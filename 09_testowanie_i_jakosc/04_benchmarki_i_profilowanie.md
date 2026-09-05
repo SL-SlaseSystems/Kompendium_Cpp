@@ -32,43 +32,69 @@ Sampling profiler ma mniejszy narzut i pokazuje hot paths. Instrumentation profi
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Benchmarki i profilowanie”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz sformułowanie hipotezy, przygotowanie kontrolowanego wejścia, zebranie wyniku, porównanie z oczekiwaniem i zachowanie reprodukcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd funkcjonalny, undefined behavior, problem przenośności i regresję wydajności, ponieważ wymagają innych narzędzi. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przypadek, kod wyjścia, raport sanitizera, statystyczny rozkład pomiarów i konfigurację kompilacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Najpierw postaw mierzalne pytanie: czas posortowania określonej liczby rekordów, liczba obsłużonych żądań na sekundę albo opóźnienie dziewięćdziesiątego dziewiątego percentyla. To różne cele. Optymalizacja przepustowości może pogorszyć opóźnienie pojedynczego żądania, gdy zwiększa grupowanie pracy. Bez wybranej metryki łatwo ogłosić sukces na podstawie liczby niepowiązanej z potrzebą użytkownika.
 
-Model dla tej części kompendium jest następujący: Żadne pojedyncze narzędzie nie dowodzi poprawności programu C++. Test sprawdza zachowanie dla danych, analiza statyczna szuka wzorców, sanitizer obserwuje wykonanie, a profiler mierzy koszt; wiarygodność daje dopiero połączenie niezależnych dowodów. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Ustal, co znajduje się w mierzonym odcinku. Jeśli porównujesz same algorytmy sortowania, generowanie danych i kopiowanie wejścia powinno być osobno. Jeśli oceniasz całą operację aplikacyjną, alokacja, dekodowanie i zapis wyniku mogą należeć do kosztu. Obie wersje są sensowne, ale odpowiadają na inne pytania. Zapisz tę granicę obok wyniku, aby ktoś inny mógł odtworzyć eksperyment.
+
+Powtarzaj pracę na odpowiednich danych. Sortowanie raz losowego, a potem wielokrotnie już posortowanego wektora zmienia scenariusz. Podobnie wyszukiwanie ciągle tego samego klucza rozgrzewa cache i predyktor inaczej niż produkcyjna mieszanka. Oddziel rozgrzewkę od pomiarów i zbieraj wiele próbek, zamiast wybierać pojedynczy najlepszy czas.
 
 ## Pogłębienie mechanizmu
 
-- Mikrobenchmark wymaga warm-up, przeciwdziałania usunięciu pracy przez optimizer i analizy rozkładu, nie jednego czasu. Profil odpowiada, gdzie program zużywa zasoby na reprezentatywnym obciążeniu, zanim powstanie hipoteza optymalizacji.
+Optymalizator może usunąć obliczenie, którego wynik nie wpływa na obserwowalne zachowanie. `volatile` nie jest ogólnym rozwiązaniem: zmienia generowane dostępy do obiektu i może mierzyć koszt innej operacji. Biblioteki benchmarkowe udostępniają narzędzia takie jak `DoNotOptimize` i `ClobberMemory`, lecz trzeba rozumieć ich granice. Nawet one nie nakazują zachowania dowolnego zbędnego podwyrażenia w dokładnie oczekiwanej postaci.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Benchmarki i profilowanie” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Średnia może ukrywać sporadyczne długie przerwy. Mediana opisuje typowy pomiar, percentyle pomagają badać ogon, a rozrzut pokazuje stabilność. Próbki nie zawsze są niezależne: temperatury procesora, skalowanie częstotliwości i inne procesy mogą zmieniać warunki przez całą serię. Porównuj wersje w podobnych warunkach i przeplataj kolejność, gdy powolny dryf maszyny wpływa na wynik.
+
+Profiler próbkowy pokazuje udział zebranych próbek stosu. Szeroki prostokąt flame graph oznacza wiele próbek w danej gałęzi, nie koniecznie jedną bardzo wolną funkcję. Koszt włączny obejmuje wywołanych potomków, a własny dotyczy samej funkcji. Profil CPU może nie wyjaśnić opóźnień programu czekającego na dysk, sieć lub mutex; potrzebne są także dane o oczekiwaniu i czasie ściennym.
+
+Prawo Amdahla ogranicza zysk całego programu: przyspieszenie niewielkiego fragmentu ma niewielki wpływ na sumę. Jeśli parser zajmuje dziesięć procent czasu, jego dwukrotne przyspieszenie redukuje całość tylko o pięć procent przy niezmienionym pozostałym koszcie. Po zmianie profiluj ponownie, ponieważ wąskie gardło może przenieść się w inne miejsce. Wynik mikrobenchmarku nie zastępuje pomiaru pełnego przepływu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Program zbiera kilka czasów sortowania, odtwarza to samo wejście przed każdą próbą i sprawdza wynik poza mierzonym odcinkiem. Jest samodzielnym ćwiczeniem metodologii, a nie gotowym dowodem przewagi konkretnego algorytmu.
 
-~~~text
-Temat: Benchmarki i profilowanie
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <random>
+#include <vector>
+
+int main() {
+    std::mt19937 generator{12345};
+    std::vector<std::uint32_t> source(20'000);
+    for (auto& value : source) value = generator();
+    std::vector<double> samples;
+    std::uint64_t checksum = 0;
+    for (int trial = 0; trial < 9; ++trial) {
+        auto values = source;
+        const auto start = std::chrono::steady_clock::now();
+        std::ranges::sort(values);
+        const auto end = std::chrono::steady_clock::now();
+        if (!std::ranges::is_sorted(values)) return 1;
+        checksum += values[values.size() / 2];
+        if (trial != 0) {
+            samples.push_back(std::chrono::duration<double, std::micro>(end - start).count());
+        }
+    }
+    std::ranges::sort(samples);
+    std::cout << "middle sample [us]: " << samples[samples.size() / 2]
+              << ", checksum: " << checksum << '\n';
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwsza próba służy rozgrzewce i nie trafia do zestawu. Wypisany checksum wiąże wynik pracy z obserwowalnym zachowaniem, ale przy bardzo agresywnej optymalizacji nadal warto sprawdzić wygenerowany kod i użyć dedykowanej biblioteki pomiarowej. Kopiowanie wejścia jest poza odcinkiem, lecz wpływa na stan cache. Otrzymujemy więc pomiar sortowania danych po świeżym kopiowaniu, a nie dowolnego możliwego stanu pamięci.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Benchmarki i profilowanie”, oceniaj zdolność wykrycia realnej regresji, powtarzalność, koszt utrzymania testu i reprezentatywność środowiska. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Mikrobenchmark pomaga rozstrzygnąć konkretny wybór w gorącym fragmencie; benchmark aplikacyjny pokazuje wartość dla całości. Profilowanie wskazuje kandydatów, a eksperyment potwierdza efekt zmiany. Zachowaj wersję kompilatora, flagi, sprzęt, rozmiary danych i surowe próbki wraz z wynikiem. Bez tych informacji niewielka procentowa różnica może być niemożliwa do odróżnienia od szumu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Wersja B jest szybsza dla stu elementów, ale wolniejsza dla miliona. Czy benchmark jest sprzeczny? **Odpowiedź:** nie. Koszty stałe, złożoność, alokacje i hierarchia cache zmieniają znaczenie wraz z rozmiarem. Decyzję należy odnieść do rzeczywistego rozkładu wejść, ewentualnie zastosować różne strategie dla uzasadnionych zakresów.
+
+Źródła: [Google Benchmark: przewodnik pomiarów](https://google.github.io/benchmark/user_guide.html), [LLVM: benchmarkowanie](https://llvm.org/docs/Benchmarking.html), [C++23: steady_clock](https://timsong-cpp.github.io/cppwp/n4950/time.clock.steady).
 
 ## Powiązane tematy
 
 - [Wydajność i cache](../13_wzorce_api_i_wydajnosc/05_wydajnosc_cache_i_zero_overhead.md)
 - [SIMD i optymalizacja](../zaawansowane/14_simd_wektoryzacja_cache_i_optymalizacja.md)
 - [chrono](../11_io_i_system/03_chrono_i_czas.md)
-

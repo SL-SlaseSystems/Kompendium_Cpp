@@ -32,44 +32,65 @@ Tuple jest dobry dla lokalnego, oczywistego zestawu danych lub generycznej infra
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „tuple, pair, variant i any”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie zakresu, wykonanie operacji zgodnie z wymaganiami iteratora i aktualizację stanu kontenera wraz z regułami invalidacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij właściciela elementów od widoku, kolejność logiczną od fizycznego układu i gwarancję złożoności od konkretnego czasu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź rozmiar i capacity, ważność iteratorów, liczbę alokacji, kolejność elementów oraz klasę złożoności. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Pierwszy przykład tworzy tuple zawierającą trzy różne pola. Deklaracja `const auto& [id, name, active]` wiąże ukryty obiekt referencyjny z istniejącą tuple, a nazwy odnoszą się do jej składowych. Zapis `auto [id, name, active] = record` najpierw utworzyłby ukrytą kopię tuple. To ma znaczenie dla kosztu napisu i dla tego, czy późniejsze modyfikacje dotyczą oryginału. Tuple referencji wymaga dodatkowej uwagi: skopiowanie tuple nie musi kopiować wskazywanych obiektów.
 
-Model dla tej części kompendium jest następujący: Kontenery i algorytmy biblioteki standardowej mają kontrakty dotyczące złożoności, invalidacji, własności oraz zakresów. Poprawny wybór wynika z wymaganych operacji i stabilności adresów, nie z przyzwyczajenia do jednego kontenera. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Variant konstruuje aktualnie wybraną alternatywę we własnej pamięci. Przypisanie napisu do wariantu, który przechowywał liczbę, kończy życie jednej alternatywy i rozpoczyna życie drugiej. `index()` identyfikuje alternatywę, `holds_alternative<T>` sprawdza typ, a `get<T>` rzuca `bad_variant_access`, gdy wybrano inny typ. `get_if<T>` zwraca wskaźnik lub null, co pasuje do opcjonalnego sprawdzenia bez wyjątku.
+
+`any_cast<int>(payload)` wymaga dokładnie odpowiedniego przechowywanego typu; nie wykonuje ogólnej konwersji liczbowej. Jeśli w `any` zapisano `long`, próba odczytu jako `int` nie skorzysta z konwersji long-to-int. Wariant wskaźnikowy `any_cast<int>(&payload)` daje null zamiast rzucać. Referencyjny cast pozwala uniknąć kopiowania zawartości, ale po zniszczeniu albo zmianie `any` uzyskana referencja może przestać być ważna.
 
 ## Pogłębienie mechanizmu
 
-- `enum class` ogranicza zasięg nazw i nie konwertuje się niejawnie do liczby. Surowa `union` wymaga ręcznego śledzenia aktywnego członu, natomiast `variant` przechowuje tag i kontroluje lifetime wariantu.
-- `pair` i `tuple` modelują produkt typów, `variant` bezpieczną sumę rozłączną, a `any` type erasure pojedynczej kopiowalnej wartości. Im słabsza informacja statyczna, tym więcej kontroli i błędów przechodzi do runtime.
+`std::visit` wybiera funkcję zgodnie z aktywną alternatywą. Visitor musi obsługiwać wszystkie kombinacje alternatyw podanych wariantów, nawet jeśli w aktualnym teście występuje tylko jedna z nich. Odmiana bez jawnego typu wyniku wymaga zgodności typów i kategorii wyników wszystkich wywołań. Można użyć zestawu przeciążonych lambd albo jednej lambdy generycznej z `if constexpr`; warto dążyć do błędu kompilacji po dodaniu nowego przypadku bez jego obsługi.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „tuple, pair, variant i any” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Variant może wyjątkowo wejść w stan `valueless_by_exception`, gdy wymiana alternatywy nie powiedzie się i nie da się zachować starej wartości. Nie jest to zwykła alternatywa „brak”. `monostate` świadomie modeluje taki przypadek domenowy, a `valueless_by_exception` opisuje konsekwencję niepowodzenia konstrukcji. Wizytacja bez wartości rzuca. Bezpieczne operacje przenoszące alternatyw ograniczają sytuacje, w których trzeba analizować taki stan.
+
+`any` opiera się na wymazaniu typu i przechowuje tylko typy spełniające wymaganie kopiowalności. Nie pomieści więc bezpośrednio `unique_ptr<T>`. Implementacja może używać małego bufora dla niektórych typów, ale nie zakładaj określonego progu ani braku alokacji. Variant ma zamknięty zestaw typów ustalony podczas kompilacji; any pozwala go rozszerzać bez zmiany listy alternatyw kosztem utraty statycznej kontroli przypadków.
+
+`std::tie(a, b)` tworzy tuple referencji do istniejących zmiennych, więc przypisanie innej pary wartości zmienia te zmienne. `std::make_tuple` zwykle tworzy wartości z przekształconych argumentów, natomiast `forward_as_tuple` zachowuje referencje i kategorie argumentów. Ten ostatni jest narzędziem do natychmiastowego przekazania, nie bezpiecznym magazynem argumentów tymczasowych na później. Tuple zawierająca referencję do zniszczonego napisu nadal może wyglądać poprawnie typowo, lecz jej użycie narusza czas życia danych.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Zamknięty zestaw poleceń lepiej opisuje variant niż para tekstowego znacznika i dowolnego payloadu. Każda alternatywa zawiera tylko własne dane.
 
-~~~text
-Temat: tuple, pair, variant i any
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <string>
+#include <variant>
+
+struct Rename { std::string name; };
+struct Reset { };
+
+template<class... Fs>
+struct Overload : Fs... { using Fs::operator()...; };
+
+int main() {
+    using Command = std::variant<Rename, Reset>;
+    std::string current = "old";
+    const auto apply = [&](const Command& command) {
+        std::visit(Overload{
+            [&](const Rename& rename) { current = rename.name; },
+            [&](const Reset&) { current.clear(); }
+        }, command);
+    };
+    apply(Rename{"new"});
+    assert(current == "new");
+    apply(Reset{});
+    assert(current.empty());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Dopisanie `struct Save` do wariantu bez rozszerzenia visitora powoduje błąd kompilacji. Nie istnieje stan „Reset z przypadkowym napisem”, bo typ Reset nie ma pola. Warto zauważyć, że visitor przechwytuje `current` przez referencję i jest używany tylko podczas życia tej zmiennej. Zapisanie go na później wymagałoby osobnego uzasadnienia czasu życia.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „tuple, pair, variant i any”, oceniaj wzorzec dostępu, lokalność danych, stabilność referencji, koszt modyfikacji i możliwość użycia gotowego algorytmu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Nazwana struktura daje najlepszy interfejs dla rekordu domenowego z trwałymi nazwami pól. Pair pasuje do par narzuconych protokołem biblioteki, np. iteratora i flagi wstawienia. Tuple jest użyteczna w szablonach, `apply` i pakietach argumentów. Variant wyraża zamknięte alternatywy, a polimorfizm dynamiczny pasuje do hierarchii rozszerzanej poza miejscem definicji. Any wybieraj na granicach, gdzie dynamiczna zawartość jest rzeczywistym wymaganiem.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dlaczego `variant<int, int>` jest mało wygodny? **Odpowiedź:** dwie alternatywy mają ten sam typ, więc operacje identyfikujące alternatywę samym typem nie rozstrzygają wyboru. Można użyć indeksów, lecz dwa nazwane typy, np. `UserId` i `OrderId`, lepiej opisują znaczenie i zapobiegają pomyleniu wartości.
+
+Źródła reguł: [C++23: variant](https://timsong-cpp.github.io/cppwp/n4950/variant), [any](https://timsong-cpp.github.io/cppwp/n4950/any), [structured bindings](https://timsong-cpp.github.io/cppwp/n4950/dcl.struct.bind).
 
 ## Powiązane tematy
 
 - [enum, union i variant](../04_klasy_i_model_obiektowy/06_enum_union_i_variant.md)
 - [optional i expected](../07_bledy_i_kontrakty/03_optional_expected_i_kody_bledow.md)
 - [Type erasure](../13_wzorce_api_i_wydajnosc/02_value_semantics_i_type_erasure.md)
-

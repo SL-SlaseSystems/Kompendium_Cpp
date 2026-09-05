@@ -41,39 +41,61 @@ Wbudowany `union` przechowuje kilka pól w tej samej pamięci, ale programista o
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „enum, union i variant”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+`enum class Status` tworzy odrębny typ, którego wartości zapisuje się przez kwalifikację, na przykład `Status::running`. Typ bazowy określa reprezentację całkowitą, ale nie sprawia, że każdy bitowy wzorzec ma nazwany enumerator. Dla typu o ustalonej reprezentacji konwersja liczby może dać poprawną wartość enumu bez odpowiadającej nazwy. Dane z protokołu wymagają zatem osobnego sprawdzenia dozwolonych przypadków.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`variant<int, string>` rezerwuje miejsce zdolne pomieścić jedną alternatywę wraz z informacją o stanie aktywności. Konstrukcja z `42` wybiera `int`. Wywołanie `visit` rozpoznaje aktywną alternatywę i przekazuje ją do odpowiedniego wywołania visitora. Kod visitora musi być poprawny dla każdej możliwej alternatywy, nawet jeśli konkretny test uruchamia tylko jedną z nich.
+
+Zmiana aktywnej alternatywy może zakończyć życie starej wartości i rozpocząć nowe w tym samym obiekcie `variant`. Referencja do dawnej wartości nie staje się automatycznie referencją do alternatywy innego typu. Interfejs `get` sprawdza aktywność, ale nie naprawia obserwatorów zachowanych przed zmianą stanu.
 
 ## Pogłębienie mechanizmu
 
-- `enum class` ogranicza zasięg nazw i nie konwertuje się niejawnie do liczby. Surowa `union` wymaga ręcznego śledzenia aktywnego członu, natomiast `variant` przechowuje tag i kontroluje lifetime wariantu.
+Domyślny `variant<Ts...>` próbuje skonstruować pierwszą alternatywę. Jeżeli nie jest ona domyślnie konstruowalna, odpowiedni konstruktor wariantu jest usunięty. `std::monostate` jako pierwsza alternatywa pozwala reprezentować jawny pusty stan. Nie jest tym samym co `valueless_by_exception`, które oznacza brak aktywnej alternatywy po określonym niepowodzeniu operacji zmieniającej stan.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „enum, union i variant” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`get<T>` wymaga, aby `T` występował na liście alternatyw dokładnie raz. Wariant może zawierać powtarzający się typ, ale wtedy dostęp i konstrukcję trzeba rozróżniać indeksem. `get_if` przyjmuje wskaźnik do wariantu i zwraca pusty wskaźnik, gdy typ lub indeks nie jest aktywny. Jest wygodny, kiedy brak konkretnej alternatywy jest zwykłą gałęzią programu, a nie wyjątkowym naruszeniem oczekiwania.
+
+Dla zwykłego `std::visit` rezultaty wszystkich potencjalnych wywołań visitora muszą mieć zgodny wymagany typ i kategorię wartości. Lambda zwracająca raz liczbę, a raz napis nie tworzy automatycznie nowego wariantu. Można jawnie wybrać wspólny typ wyniku lub użyć odpowiedniego przeciążenia `visit<R>` dostępnego od C++20. Przy wielu wariantach liczba kombinacji typów rośnie jak iloczyn liczb alternatyw.
+
+Wbudowany `union` nie przechowuje automatycznie znacznika aktywnego pola. Dla nietrywialnych alternatyw może wymagać ręcznej konstrukcji i destrukcji. Odczyt nieaktywnego pola jest zasadniczo niedozwolony, z wąskimi wyjątkami, takimi jak odpowiednio użyty common initial sequence klas standard-layout. Nie jest to ogólna technika reinterpretowania `float` jako `unsigned`. Do legalnego kopiowania reprezentacji odpowiednich trywialnie kopiowalnych typów służy `std::bit_cast` od C++20.
+
+Enum flagowy wymaga osobno zdefiniowanych operacji bitowych i polityki dopuszczalnych kombinacji. `enum class` celowo ich nie dostarcza przez niejawną konwersję do liczby. `std::to_underlying` od C++23 zwraca wartość w typie bazowym, ale nie waliduje, czy odpowiada jednemu z zadeklarowanych enumeratorów. Serializacja musi też uwzględniać kolejność bajtów i format protokołu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Jawne alternatywy uniemożliwiają przechowanie jednocześnie danych sukcesu i błędu jako niezależnych, sprzecznych pól. `monostate` oznacza brak jeszcze otrzymanej odpowiedzi.
 
-~~~text
-Temat: enum, union i variant
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <string>
+#include <variant>
+
+struct Success { int count; };
+struct Failure { std::string message; };
+using Reply = std::variant<std::monostate, Success, Failure>;
+
+int main() {
+    Reply reply;
+    assert(std::holds_alternative<std::monostate>(reply));
+    reply.emplace<Success>(Success{3});
+    if (const auto* success = std::get_if<Success>(&reply)) {
+        assert(success->count == 3);
+    } else {
+        assert(false);
+    }
+    reply.emplace<Failure>(Failure{"invalid input"});
+    assert(std::get_if<Success>(&reply) == nullptr);
+    assert(std::get<Failure>(reply).message == "invalid input");
+}
 ~~~
-
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „enum, union i variant”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj enumu do skończonego zestawu nazw bez różnych danych. Wybierz `variant`, gdy poszczególne stany mają różne pola. `optional<T>` odpowiada prostemu „jest lub nie ma T”, a `expected<T, E>` w C++23 szczególnie dobrze opisuje wynik lub błąd. Surowa unia jest narzędziem dla warstwy implementacyjnej wymagającej kontroli reprezentacji, nie domyślnym modelem stanu aplikacji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `Status value = static_cast<Status>(200);` dowodzi, że `value` oznacza legalny stan aplikacji, jeśli typ bazowy to `unsigned char`?
+
+**Odpowiedź.** Nie. Liczba mieści się w reprezentacji, ale może nie odpowiadać żadnej dopuszczalnej wartości domenowej. Parser powinien rozpoznać dozwolone kody i zwrócić błąd dla pozostałych, zanim taki stan trafi do dalszej logiki.
+
+Źródła: [wyliczenia](https://timsong-cpp.github.io/cppwp/n4950/dcl.enum), [unie](https://timsong-cpp.github.io/cppwp/n4950/class.union), [variant](https://timsong-cpp.github.io/cppwp/n4950/variant), [visit](https://timsong-cpp.github.io/cppwp/n4950/variant.visit).
 
 ## Powiązane tematy
 

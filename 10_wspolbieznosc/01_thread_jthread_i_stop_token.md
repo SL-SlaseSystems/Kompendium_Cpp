@@ -36,39 +36,58 @@ Wyjątek opuszczający funkcję wątku wywołuje `std::terminate`; `join` nie pr
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „thread, jthread i stop_token”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz publikację danych, ustanowienie synchronizacji, wykonanie pracy przez wiele wątków i bezpieczne zakończenie lub anulowanie. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wzajemne wykluczanie, komunikację, postęp algorytmu i czas życia danych współdzielonych. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant chroniony blokadą, memory order, ownership wątku, ślad TSan i test kontrolowanego zamknięcia. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Konstruktor wątku przygotowuje funkcję i argumenty, a następnie uruchamia nowe wykonanie. To, który wątek pierwszy wykona kolejną instrukcję po rozpoczęciu pracy, zależy od harmonogramu. Nie zakładaj, że pracownik jeszcze nie wystartował, dopóki konstruktor nie wrócił do klienta. Inicjalizację danych potrzebnych pracownikowi wykonaj przed jego uruchomieniem albo publikuj je przez osobny poprawny protokół.
 
-Model dla tej części kompendium jest następujący: Współbieżny program opisuje relacje happens-before między operacjami. Sam czas zegarowy lub obserwowana kolejność logów nie ustanawia synchronizacji; dostęp do współdzielonego, nieatomowego obiektu bez właściwej relacji może być data race i UB. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`join` czeka na zakończenie reprezentowanego wykonania i ustanawia synchronizację z jego zakończeniem. Dlatego po skutecznym join właściciel może czytać wynik zapisany wyłącznie przez pracownika do zwykłej zmiennej. W pierwszym przykładzie licznik jest atomic, ale przy braku równoległych odczytów i przy odczycie wyłącznie po join wystarczyłby zwykły `int`. Atomik jest potrzebny dopiero, gdy projekt rzeczywiście wymaga współbieżnego dostępu.
+
+`joinable` oznacza, że obiekt reprezentuje wykonanie, które nie zostało dołączone ani odłączone. Nie oznacza, że wątek aktualnie wykonuje instrukcje. Nawet już zakończony pracownik pozostawia joinable `thread`, dopóki właściciel go nie dołączy. Próba join na sobie prowadzi do błędu, a zarządzanie tym samym uchwytem równolegle wymaga osobnej synchronizacji.
 
 ## Pogłębienie mechanizmu
 
-- `jthread` dołącza wątek w destruktorze i współpracuje ze `stop_token`, zmniejszając ryzyko `terminate` przez joinable thread. Prośba stop jest kooperacyjna: kod pracy musi sprawdzać token i kończyć zasoby.
+Destruktor joinable `jthread` najpierw zgłasza żądanie zatrzymania, a potem wykonuje join. Samo jawne `join()` nie zgłasza stop, co ma znaczenie w pierwszym przykładzie: pracownik kończy po trzech iteracjach własnym warunkiem. Jeżeli pętla kończy się wyłącznie po stop, jawne join bez wcześniejszego `request_stop` będzie czekało na żądanie pochodzące skądinąd.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „thread, jthread i stop_token” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Stan zatrzymania jest współdzielony przez `stop_source`, `stop_token` i zarejestrowane callbacki. Żądanie jest trwałe i nie można go wycofać do stanu „nie zatrzymuj”. Token pozwala obserwować i rejestrować reakcje, a źródło zgłasza żądanie. Callback może być wykonany synchronicznie w wątku wywołującym `request_stop`, a rejestracja po zgłoszeniu stop może wykonać go od razu. Nie traktuj callbacka jak zadania zawsze przekazanego do osobnego executora.
+
+Anulowanie wymaga decyzji domenowej: czy kończymy bieżący rekord, porzucamy częściowy wynik, czy zwracamy oznaczenie niekompletności? Flaga stop nie cofa zapisu do pliku i nie zwalnia automatycznie blokującego API nieświadomego tokena. `condition_variable_any` ma przeciążenia oczekiwania świadome stop; zwykłe `condition_variable::wait` nie dostaje tej własności tylko dlatego, że wątek jest typu jthread.
+
+Kolejność pól właściciela ma znaczenie. Są niszczone w odwrotnej kolejności deklaracji, dlatego wątek korzystający z innych pól często powinien być zadeklarowany po nich, aby dołączył przed ich zniszczeniem. Równie ważne jest niewywoływanie join podczas trzymania mutexa, którego pracownik potrzebuje do zakończenia. Automatyczna destrukcja nie jest dowodem braku deadlocka.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Pracownik czeka w sposób świadomy zatrzymania. Program działa również wtedy, gdy żądanie dotrze jeszcze przed rozpoczęciem oczekiwania; nie polega na opóźnieniach czasowych.
 
-~~~text
-Temat: thread, jthread i stop_token
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
+int main() {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool job_ready = false;
+    bool stopped = false;
+    std::jthread worker([&](std::stop_token token) {
+        std::unique_lock lock{mutex};
+        const bool ready = changed.wait(lock, token, [&] { return job_ready; });
+        stopped = !ready && token.stop_requested();
+    });
+
+    worker.request_stop();
+    worker.join();
+    assert(stopped);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Wynik przeciążenia z predykatem informuje o wartości predykatu po zakończeniu oczekiwania. Gdy prawdziwy predykat i stop wystąpią razem, aplikacja musi określić pierwszeństwo pracy lub anulowania. Tutaj predykat stale pozostaje fałszywy, więc wynik oznacza przerwanie. Zmienna `stopped` nie jest atomowa, bo główny wątek czyta ją dopiero po join; mutex i condition variable żyją dłużej od pracownika.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „thread, jthread i stop_token”, oceniaj najprostszy poprawny model, możliwość anulowania, brak data race, ograniczone contention i udowodniony lifetime. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Jthread jest dobrym właścicielem samodzielnego długotrwałego pracownika, ale nie tworzy puli zadań. Uruchamianie systemowego wątku dla każdego drobnego elementu może kosztować więcej niż obliczenie. Liczba zadań i liczba wątków nie muszą być równe. `hardware_concurrency` jest wskazówką i może zwrócić zero; nie jest gwarantowaną receptą na optymalny rozmiar puli.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `detach` rozwiązuje problem długiego oczekiwania w destruktorze? **Odpowiedź:** usuwa czekanie właściciela, ale pozostawia wykonanie bez tej kontroli czasu życia. Jeśli korzystało z lokalnych danych, może dostać wiszące referencje. Prawidłową naprawą jest określenie zakończenia i odblokowania pracy, nie samo porzucenie uchwytu.
+
+Źródła reguł: [C++23: wątki](https://timsong-cpp.github.io/cppwp/n4950/thread.threads), [zatrzymanie kooperacyjne](https://timsong-cpp.github.io/cppwp/n4950/thread.stoptoken), [condition_variable_any](https://timsong-cpp.github.io/cppwp/n4950/thread.condition.condvarany).
 
 ## Powiązane tematy
 

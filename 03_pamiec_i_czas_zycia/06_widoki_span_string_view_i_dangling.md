@@ -37,39 +37,61 @@ Ranges views są często leniwe i również mogą przechowywać referencje do za
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Widoki, span, string_view i dangling”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Utworzenie `string_view` z napisu nie kopiuje jego znaków. Widok zapamiętuje początek i długość, a indeksowanie odwołuje się do danych właściciela. Zmiana istniejącego znaku w żywym, nierealokowanym napisie może stać się widoczna przez widok. Zniszczenie właściciela lub operacja unieważniająca jego bufor sprawia natomiast, że ta sama para adresu i długości nie uprawnia już do dostępu.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`span` działa analogicznie dla elementów dowolnego odpowiedniego typu. `span<const int>` zabrania modyfikowania elementów przez ten interfejs. `const span<int>` jest stałym uchwytem, który nadal pozwala modyfikować wskazane liczby. Trzeba więc odczytywać miejsce kwalifikatora, a nie tylko jego obecność. Zwykły widok przekazuje się przez wartość, ponieważ kopia uchwytu jest mała i nie kopiuje całego zakresu.
+
+W pierwszym programie tablica w `main` żyje przez wszystkie wywołania `sum`, a literały napisowe mają statyczny czas przechowywania. Żaden widok nie ucieka poza bezpieczny czas użycia. Inna sytuacja to `std::string_view v = std::string{"abc"};`: temporary jest niszczone przy średniku, więc późniejszy odczyt z `v` byłby użyciem wiszącego widoku.
 
 ## Pogłębienie mechanizmu
 
-- `span` i `string_view` są niewłaścicielskimi widokami; kopiowanie widoku nie przedłuża lifetime danych. API powinno dokumentować zależność czasową i unikać zwracania widoku do obiektu lokalnego lub tymczasowego napisu.
+Wywołanie synchroniczne `consume(std::string{"abc"})`, gdzie parametr ma typ `string_view`, może być poprawne: napis trwa do końca pełnego wyrażenia, czyli przez całe wywołanie. Funkcja nie może zachować widoku do późniejszego użycia bez dodatkowej umowy. Przeniesienie tego samego kodu do kolejki zadań zmienia wymagania czasu życia, choć typ parametru i składnia jego utworzenia pozostają identyczne.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Widoki, span, string_view i dangling” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`string::substr` zwraca nowy właścicielski napis. Dlatego `string_view v = text.substr(0, 3);` tworzy widok do temporary, a nie bezpośrednio do `text`. Jeśli potrzebny jest fragment istniejącego bufora, najpierw utwórz `string_view{text}`, a potem wywołaj jego `substr`. To ważne rozróżnienie dwóch metod o takiej samej nazwie, ale innej semantyce własności.
+
+`string_view::data()` nie gwarantuje terminatora za końcem widoku. Dla prefiksu większego napisu funkcja C oczekująca zera może odczytać więcej znaków niż obejmuje fragment. Dla dowolnego bufora może wyjść poza legalny zakres. Gdy zewnętrzne API wymaga C stringa, utwórz niezależny `std::string` i użyj jego `c_str`, zachowując właściciela przez całe wywołanie.
+
+`span<T, N>` przechowuje rozmiar w typie, natomiast `span<T>` ma dynamiczny extent. Stały extent pozwala wyrażać interfejs dla dokładnie określonej liczby elementów, lecz sam `span` nie sprawdza wszystkich indeksów podczas wykonania. W C++23 wyjście poza zakres przez `operator[]` narusza wymagania; nie zakładaj automatycznego wyjątku. Konstrukcja widoku z wskaźnika i rozmiaru również wymaga prawdziwego legalnego zakresu.
+
+Nie każdy typ będący `ranges::view` jest niewłaścicielski: istnieje na przykład `owning_view`. Z kolei `borrowed_range` oznacza możliwość zachowania iteratorów po zniszczeniu samego obiektu zakresu, nie obietnicę życia jego zewnętrznych danych. `string_view` może być borrowed range i jednocześnie wskazywać zniszczony napis. Te pojęcia opisują różne zależności.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Funkcja zwraca fragment argumentu, więc wynik pozostaje zależny od oryginalnego właściciela. Program tworzy także kopię znaków, aby pokazać różnicę między aliasem i niezależną wartością.
 
-~~~text
-Temat: Widoki, span, string_view i dangling
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <string>
+#include <string_view>
+
+std::string_view first_word(std::string_view text) {
+    const auto space = text.find(' ');
+    return text.substr(0, space);
+}
+
+int main() {
+    std::string line = "alpha beta";
+    std::string_view word = first_word(line);
+    std::string saved{word};
+    line[0] = 'A';
+    assert(word == "Alpha");
+    assert(saved == "alpha");
+    assert(word.size() == 5);
+    assert(line.size() == 10);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Zmiana pojedynczego istniejącego znaku przez `operator[]` nie realokuje napisu. Widok obserwuje zmianę, a kopia pozostaje niezależna. Gdyby funkcję wywołano z tymczasowym `std::string` i zachowano sam widok po średniku, ten model przestałby być bezpieczny.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Widoki, span, string_view i dangling”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Zwracaj widok, gdy API celowo identyfikuje część istniejących danych i potrafisz jasno opisać ich właściciela. Zwracaj wartość, gdy wynik ma żyć niezależnie lub przechodzi do asynchronicznego zadania. Dla klasy przechowującej jednocześnie napis i widok do własnego napisu szczególnie ostrożnie projektuj kopiowanie i ruch: domyślna kopia widoku może nadal wskazywać bufor starego obiektu. Indeksy względem własnego bufora często lepiej wyrażają taki fragment.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy skopiowanie wiszącego `string_view` do nowego `string_view` naprawia czas życia? Czy utworzenie `std::string` zawsze naprawi problem?
+
+**Odpowiedź.** Kopia widoku przenosi ten sam nieaktualny adres. Kopia znaków do `string` jest poprawnym rozwiązaniem tylko wtedy, gdy źródło jeszcze żyje w chwili kopiowania. Próba skopiowania już wiszących danych sama wykonuje nielegalny odczyt.
+
+Źródła: [string_view](https://timsong-cpp.github.io/cppwp/n4950/string.view), [span](https://timsong-cpp.github.io/cppwp/n4950/views.span), [borrowed_range](https://timsong-cpp.github.io/cppwp/n4950/range.range).
 
 ## Powiązane tematy
 

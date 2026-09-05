@@ -57,41 +57,71 @@ Parametry referencyjne nie są automatycznie kopiowane do bezpiecznej własnośc
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Korutyny: promise, awaitery i frame”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie `two_steps(state)` tworzy stan korutyny, umieszcza w nim potrzebne kopie parametrów i konstruuje promise. `get_return_object` buduje `Task`, który przejmuje odpowiedzialność za ramkę. `initial_suspend` zwraca `suspend_always`, dlatego samo wywołanie funkcji nie wykonuje jeszcze przypisania `state = 1`. To model lazy start, niezależny od uruchamiania wątków.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Pierwsze `resume` przechodzi przez początkowe zawieszenie i wykonuje kod do kolejnego `co_await`. `state` staje się `1`, a ramka zachowuje punkt wznowienia. Drugie `resume` wykonuje dalszą część, ustawia `2` i dochodzi do końca funkcji, równoważnego odpowiedniemu `co_return`. Promise obsługuje zakończenie, a `final_suspend` pozostawia ramkę istniejącą. Dopiero destruktor `Task` wywołuje `destroy` i zwalnia jej zasoby.
 
 ## Pogłębienie mechanizmu
 
-- Promise zapisuje wynik współdzielonego stanu, a future pobiera go najwyżej zgodnie z kontraktem danego typu. Polityka `std::async` może dopuścić wykonanie deferred, więc jawna polityka jest potrzebna, gdy wymagany jest osobny wątek.
-- Korutyna jest transformowana do maszyny stanów z ramką przechowującą parametry i lokale żyjące przez zawieszenie. Typ zwracany oraz `promise_type` definiują protokół, a sam język nie dostarcza schedulera.
-- `co_await` jest rozwijane przez protokół `await_ready`, `await_suspend` i `await_resume`. Ownership coroutine handle oraz chwila zniszczenia frame muszą być jawne, szczególnie przy wyjątkach i anulowaniu.
+`coroutine_handle` jest lekkim uchwytem do ramki, nie jej automatycznym właścicielem. Skopiowanie uchwytu nie liczy referencji i nie zabezpiecza przed podwójnym `destroy`. Wrapper powinien definiować własność, przenoszenie i zachowanie pustego stanu. W pokazanym `Task` wolno badać `done` i wznawiać tylko niepusty, odpowiednio zawieszony uchwyt; wznowienie korutyny na final suspend narusza kontrakt. Bezpieczniejszy interfejs produkcyjny sprawdza stan lub ukrywa ręczne `resume` przed klientem.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Korutyny: promise, awaitery i frame” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Transformacja `co_await` może najpierw przejść przez `promise.await_transform`, następnie odpowiedni `operator co_await`, a dopiero potem otrzymuje awaiter. `await_ready` zwracające `true` pomija zawieszenie i prowadzi do `await_resume`. Gdy potrzebne jest zawieszenie, `await_suspend` otrzymuje uchwyt już zawieszonej korutyny. Może zwrócić `void`, wartość logiczną albo inny coroutine handle, określając sposób przekazania sterowania.
+
+Publikacja uchwytu innemu wątkowi wewnątrz `await_suspend` wymaga synchronizacji. Inny wątek może wznowić korutynę, zanim `await_suspend` zakończy działanie, a awaiter może zostać już zniszczony. Po publikacji nie wolno bez odpowiedniego dowodu dalej korzystać z jego pól. To jedna z przyczyn, dla których poprawny awaiter sieciowy wymaga znacznie więcej niż zapisania callbacka.
+
+Parametr przez wartość zostaje przeniesiony lub skopiowany do stanu według reguł korutyny. Parametr przez referencję zachowuje referencję. Również przechwycenia korutynowej lambdy należą do obiektu domknięcia i nie stają się automatycznie bezpiecznymi kopiami w ramce. Tymczasowa lambda znikająca po wywołaniu może pozostawić korutynę z odwołaniem do zniszczonych przechwyceń. Często lepiej przekazać potrzebne wartości jako jawne parametry korutyny.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <coroutine>
+#include <exception>
 
-~~~text
-Temat: Korutyny: promise, awaitery i frame
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct ReadyTask {
+    struct promise_type {
+        ReadyTask get_return_object() { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() { std::terminate(); }
+    };
+};
+struct Immediate {
+    int value;
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(std::coroutine_handle<>) const noexcept {}
+    int await_resume() const noexcept { return value; }
+};
+ReadyTask compute(int& result) {
+    result = co_await Immediate{42};
+}
+int main() {
+    int result = 0;
+    compute(result);
+    assert(result == 42);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Tutaj korutyna wykonuje się od razu, awaiter nigdy jej nie zawiesza, a końcowe `suspend_never` pozwala automatycznie zniszczyć ramkę. Obiekt wyniku nie przechowuje uchwytu, więc nie próbuje ponownie niszczyć zakończonego stanu. `await_suspend` istnieje dla kompletności protokołu, ale na tej ścieżce nie jest wywołane. Kontrast z pierwszym przykładem pokazuje, że wybór final suspend musi pasować do strategii własności.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Korutyny: promise, awaitery i frame”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Korutyna opisuje zawieszalne obliczenie; executor, pętla zdarzeń, wątek i operacje wejścia/wyjścia są osobnymi elementami biblioteki. Generator synchroniczny może nie potrzebować żadnej synchronizacji. Zadanie asynchroniczne potrzebuje natomiast propagacji wyjątków, reguł anulowania i zachowania po porzuceniu wyniku. `destroy` nie jest uniwersalną operacją anulowania zewnętrznego żądania: callback nadal posiadający uchwyt mógłby później odwołać się do zwolnionej ramki.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `Task task = two_steps(local)` może przeżyć `local`? **Odpowiedź:** nie, funkcja używa referencji. Czy `done()` oznacza, że pamięć ramki jest już zwolniona? Nie, przy `suspend_always` w final suspend ramka czeka na właściciela. Czy `co_await` sam tworzy wątek? Nie; przebieg wynika z awaitera i infrastruktury wykonania.
+
+Źródła: [N4950: definicja korutyny](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct.def.coroutine) i [await expression](https://timsong-cpp.github.io/cppwp/n4950/expr.await).
+
+### Wyjątki i niszczenie zawieszonego stanu
+
+Wyjątki z ciała korutyny są kierowane do `unhandled_exception` według transformacji języka. W przykładach wybrano jawne `terminate`, aby nie udawać pełnego transportu błędów. Produkcyjny typ zadania często zapisuje `exception_ptr` w promise, a odbiorca wyniku ponownie zgłasza wyjątek. Błędy tworzenia ramki i początkowych kopii parametrów mają odrębne miejsca wystąpienia; nie wszystkie awarie zadania pojawiają się dopiero przy odbiorze wyniku.
+
+Zniszczenie zawieszonej ramki uruchamia destruktory żywych obiektów przechowywanych w jej stanie. Kod znajdujący się po punkcie zawieszenia nie zostaje jednak zwyczajnie wykonany. Jeżeli sprzątanie zapisano jako instrukcję na końcu ciała zamiast w RAII, porzucenie korutyny może je pominąć. To ten sam argument za destruktorami, który obowiązuje dla wyjątków, zastosowany do dodatkowej drogi kończenia obliczenia.
+
+Rozmiar ramki zależy od wartości, które muszą przetrwać zawieszenie, oraz decyzji optymalizatora. Duży bufor lokalny może zwiększać koszt każdego zadania nawet wtedy, gdy nie jest osobno alokowany przez programistę. Przeniesienie go do krótszego zakresu przed zawieszeniem może pomóc, ale należy sprawdzić faktyczny wynik kompilacji i nie opisywać konkretnego layoutu ramki jako gwarancji języka.
+
+Symmetric transfer przekazuje sterowanie przez zwrócenie uchwytu z await_suspend, zamiast ręcznie wywoływać kolejne resume na zagnieżdżonym stosie wywołań. Może ograniczać narastanie stosu przy łańcuchach zadań, lecz nadal potrzebuje prawidłowej własności obu ramek. Kontynuacja musi pozostać dostępna, a stan zakończonego zadania nie może zostać zniszczony przed odczytaniem wyniku. Nie jest to osobna gwarancja synchronizacji pamięci między wątkami.
 
 ## Powiązane tematy
 

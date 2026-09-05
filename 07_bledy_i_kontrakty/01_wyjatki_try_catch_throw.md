@@ -30,47 +30,77 @@ int main() {
 
 Wyjątki są odpowiednie, gdy funkcja nie może spełnić zwykłego kontraktu, a błąd ma propagować przez wiele warstw. Nie są dobrym zamiennikiem normalnego rozgałęzienia, np. „nie znaleziono elementu” w częstej ścieżce. Projekty bez wyjątków wymagają konsekwentnej alternatywy i muszą uwzględnić, że wiele elementów standardowej biblioteki może rzucać.
 
-Nie rzucaj wskaźników ani typów niekopiowalnych. Hierarchia błędów powinna przenosić stabilną informację, a nie zmuszać klienta do parsowania tekstu `what()`. Wyjątki nie mogą przekraczać granicy C ABI.
+Nie rzucaj wskaźników ani typów niekopiowalnych. Hierarchia błędów powinna przenosić stabilną informację, a nie zmuszać klienta do parsowania tekstu `what()`. Na granicy API używanego przez kod C przechwytuj wyjątki i tłumacz je na uzgodniony wynik. Samo `extern "C"` nie jest specyfikacją `noexcept`, ale obcy kod nie zapewnia przenośnego protokołu obsługi wyjątków C++.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Wyjątki: try, catch i throw”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wykrycie niespełnionego warunku, zbudowanie informacji o błędzie, propagację przez granice oraz odtworzenie prawidłowego stanu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd możliwy do obsłużenia od naruszenia precondition i zagwarantuj sprzątanie niezależnie od wybranej ścieżki. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ błędu, zachowany kontekst, stan obiektów po porażce i spełniony poziom exception safety. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie `parse_port("abc")` nie zwraca wartości zastępczej. `throw` inicjalizuje obiekt wyjątku, a dalsze instrukcje tej ścieżki zostają pominięte. Mechanizm obsługi szuka najbliższego dynamicznie otaczającego handlera z pasującym typem. Nie musi on znajdować się w tej samej funkcji: może otaczać wywołanie kilka poziomów wyżej. Dopasowanie wyjątków nie jest zwykłym overload resolution i nie wykonuje dowolnych konwersji definiowanych przez użytkownika.
 
-Model dla tej części kompendium jest następujący: Obsługa błędów zaczyna się od klasyfikacji niepowodzenia: naruszenie kontraktu programisty, spodziewany brak wyniku, błąd środowiska albo awaria uniemożliwiająca kontynuację. Mechanizm raportowania powinien odpowiadać tej kategorii. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Po znalezieniu handlera opuszczane zakresy sprzątają skonstruowane obiekty automatyczne w odwrotnej kolejności zakończenia konstrukcji. To właśnie pozwala `unique_ptr`, kontenerom i strażnikom blokad działać bez powtarzania cleanup w każdej gałęzi. Jeżeli konstruktor obiektu rzuci, destruktor tego nieukończonego obiektu nie zostanie wywołany; zostaną jednak zniszczone jego już skonstruowane pola i klasy bazowe. Surowy uchwyt pozyskany w ciele konstruktora bez osłony RAII może wtedy wyciec.
+
+Handler działa już po sprzątnięciu opuszczonych zakresów. Po jego normalnym zakończeniu sterowanie przechodzi za cały blok `try` z handlerami, a nie wraca do instrukcji, która rzuciła. Wyjątki nie są mechanizmem wznowienia przerwanej operacji. Ponowienie wymaga jawnej pętli i stanu, dla którego operacja może być bezpiecznie wykonana ponownie.
 
 ## Pogłębienie mechanizmu
 
-- Rzucenie wyjątku rozpoczyna wyszukiwanie handlera i niszczenie automatycznych obiektów na opuszczanych zakresach. Catch przez `const&` zachowuje dynamiczny typ i unika kopiowania lub slicing.
+`throw;` ponownie zgłasza aktualnie obsługiwany obiekt wyjątku, zachowując jego dynamiczny typ. `throw error;`, gdy `error` ma typ referencji do klasy bazowej, tworzy nowy wyjątek z wyrażenia o statycznym typie bazowym i może obciąć część pochodną. Samo `throw;` bez aktywnego wyjątku wywołuje `terminate`. Referencja uzyskana w `catch` nie jest trwałym wynikiem: nie zachowuj jej po zakończeniu obsługi bez mechanizmu posiadającego obiekt wyjątku.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Wyjątki: try, catch i throw” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Do przechowania i późniejszego ponownego zgłoszenia służą `exception_ptr`, `current_exception` oraz `rethrow_exception`. To między innymi podstawa przekazywania błędu przez future. Wyjątek rzucony w funkcji startowej wątku nie trafia sam do `catch` wokół utworzenia wątku. Musi zostać przechwycony w pracowniku i przekazany odpowiednio zsynchronizowanym kanałem.
+
+Jeżeli podczas rozwijania stosu destruktor wypuści kolejny wyjątek, zostaje wywołane `terminate`. Destruktor może wewnętrznie wykonać operację rzucającą i ją obsłużyć, ale nie powinien wypuszczać porażki sprzątania. Przy braku pasującego handlera standard dopuszcza implementacyjny wybór, czy nastąpi rozwijanie stosu przed `terminate`; nie projektuj odzyskiwania ważnych danych z założeniem, że wtedy wszystkie destruktory na pewno się wykonają.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Ten program pokazuje zarówno automatyczne sprzątnięcie, jak i zachowanie typu przy ponownym rzuceniu. Licznik nie jest globalny i pozwala sprawdzić stan po wejściu do zewnętrznego handlera.
 
-~~~text
-Temat: Wyjątki: try, catch i throw
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <stdexcept>
+
+struct Failure : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+struct Activity {
+    int& count;
+    explicit Activity(int& n) : count(n) { ++count; }
+    ~Activity() { --count; }
+};
+
+void operation(int& count) {
+    Activity activity{count};
+    try {
+        throw Failure{"operation failed"};
+    } catch (const std::exception&) {
+        assert(count == 1);
+        throw;
+    }
+}
+
+int main() {
+    int active = 0;
+    bool caught = false;
+    try {
+        operation(active);
+    } catch (const Failure&) {
+        caught = true;
+        assert(active == 0);
+    }
+    assert(caught);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Wewnętrzny handler nie opuścił jeszcze zakresu `activity`, więc licznik wynosi jeden. Ponowne zgłoszenie opuszcza funkcję i uruchamia destruktor, zanim zewnętrzny handler zobaczy porażkę. Zmiana `throw;` na `throw error;` po nazwaniu parametru bazowego zmieniłaby typ nowego wyjątku i zewnętrzny `catch(Failure)` nie byłby właściwym odbiorcą.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Wyjątki: try, catch i throw”, oceniaj częstotliwość błędu, koszt ścieżki sukcesu, możliwość pominięcia wyniku, zgodność z RAII i czytelność kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Umieszczaj handlery tam, gdzie można wykonać decyzję: ponowić żądanie, wycofać transakcję, przetłumaczyć błąd na protokół lub zakończyć zadanie. Łapanie na każdym poziomie tylko po to, aby zalogować i ponownie rzucić, produkuje wielokrotne komunikaty bez dodatkowego odzyskiwania. Tekst `what()` służy człowiekowi; decyzje programu powinny zależeć od typu lub strukturalnych pól błędu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Konstruktor pozyskał plik w polu RAII, a następnie budowa drugiego pola rzuciła. Czy potrzebny jest `catch` w konstruktorze do zamknięcia pliku? **Odpowiedź:** nie, ukończone pole zostanie zniszczone automatycznie. Handler bywa potrzebny do tłumaczenia wyjątku, ale nie zastępuje własności zasobów przez pola. Sam obiekt docelowy nie został skutecznie skonstruowany.
+
+Źródła reguł: [C++23: obsługa wyjątków](https://timsong-cpp.github.io/cppwp/n4950/except), [dopasowanie handlerów](https://timsong-cpp.github.io/cppwp/n4950/except.handle), [terminate](https://timsong-cpp.github.io/cppwp/n4950/except.terminate).
 
 ## Powiązane tematy
 
 - [Exception safety i noexcept](02_raii_exception_safety_i_noexcept.md)
 - [optional, expected i kody błędów](03_optional_expected_i_kody_bledow.md)
 - [RAII](../03_pamiec_i_czas_zycia/03_raii_i_destruktory.md)
-

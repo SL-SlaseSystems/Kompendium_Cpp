@@ -32,40 +32,69 @@ Moduły zmieniają model widoczności deklaracji, lecz ODR nadal obowiązuje. Mo
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „ODR, moduły, FFI i interoperacyjność”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+`extern "C"` w przykładzie nadaje funkcji C language linkage. Wrapper C++ wywołuje ją zwyczajnie, bez zmiany semantyki dodawania. Zakres argumentów nadal musi gwarantować reprezentowalny wynik w `int`; językowe powiązanie C nie legalizuje przepełnienia. Klient innego języka potrzebuje deklaracji o zgodnych typach oraz zgodnej konwencji wywołania na konkretnej platformie.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W stabilniejszym interfejsie oddziela się utworzenie uchwytu, operacje na nim i jego zniszczenie. Implementacja ukrywa pola struktury, a odbiorca przechowuje jedynie wskaźnik do typu niekompletnego. Funkcja tworząca oddaje własność, funkcja niszcząca ją odbiera, a pozostałe pożyczają uchwyt. Dzięki temu zmiana wewnętrznego `vector` lub mutexa nie wymaga od klienta znajomości nowego `sizeof` klasy.
 
 ## Pogłębienie mechanizmu
 
-- ODR wymaga pojedynczej definicji odr-used bytu w programie, z wyjątkami dla zgodnych definicji inline i template. `inline` pozwala na definicje w wielu jednostkach; nie jest poleceniem wykonania inline przez optimizer.
-- Granica FFI powinna używać stabilnych typów i jawnej konwencji wywołania; wyjątki, klasy STL i ownership nie powinny przechodzić przez niezgodne ABI. Moduły nie usuwają ODR ani problemu wersjonowania binarnego.
+One Definition Rule kontroluje tożsamość definicji w programie. Zwykła funkcja o zewnętrznym linkage powinna mieć odpowiednią pojedynczą definicję. Dla inline functions, klas i szablonów istnieją warunkowe wyjątki pozwalające na wiele definicji, ale wymagają między innymi odpowiedniej zgodności tokenów i lookup. Makro zmieniające treść klasy w różnych jednostkach translacji może złamać ODR, choć każda jednostka osobno się kompiluje i linker nie zgłasza konfliktu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „ODR, moduły, FFI i interoperacyjność” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`inline` nie znaczy „linker wybierze dowolną z różnych implementacji”. Jest zobowiązaniem, że wielokrotne definicje spełniają reguły języka. LTO może ujawnić naruszenia lub umożliwić optymalizacje wykorzystujące założenie ich braku. Flagi pakowania struktur, różne ustawienia biblioteki standardowej i makra konfiguracyjne mogą naruszyć zgodność równie skutecznie jak jawna zmiana kodu.
+
+Named modules oddzielają eksport deklaracji od tekstowego włączania nagłówków. Import nie jest kopiowaniem tekstu i nie przenosi arbitralnie makr interfejsu tak jak `#include`. Global module fragment służy między innymi do dołączania tradycyjnych nagłówków przed deklaracją modułu. Deklaracje mają attachment i reachability; definicje dołączone do nazwanego modułu podlegają innym warunkom niż tradycyjne wielokrotne definicje nagłówkowe.
+
+BMI lub IFC jest artefaktem konkretnego kompilatora i konfiguracji. Standard nie definiuje formatu wymiany takiego pliku ani formatu dynamicznej biblioteki. Moduł może zmniejszyć zależności tekstowe i poprawić izolację, lecz nie rozwiązuje automatycznie problemów ABI, cykli zależności czy synchronizacji etapów budowania. Dystrybucja źródłowego interfejsu modułu i dystrybucja gotowego binarium wymagają osobnych polityk kompatybilności.
+
+Na granicy FFI `noexcept` nie tłumaczy wyjątku na kod błędu. Nieprzechwycony wyjątek z takiej funkcji prowadzi do `terminate`. Wrapper powinien złapać przewidywane błędy oraz pozostałe wyjątki i zbudować reprezentację zrozumiałą dla odbiorcy. Obie strony muszą również ustalić kodowanie tekstu, długości buforów, możliwość przechowywania callbacka i wątek, na którym wolno go wywołać.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <new>
 
-~~~text
-Temat: ODR, moduły, FFI i interoperacyjność
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct engine { int value = 42; };
+extern "C" {
+int engine_create(engine** out) noexcept {
+    if (!out) return 1;
+    *out = nullptr;
+    try { *out = new engine; return 0; }
+    catch (...) { return 2; }
+}
+int engine_read(const engine* ptr, int* out) noexcept {
+    if (!ptr || !out) return 1;
+    *out = ptr->value;
+    return 0;
+}
+void engine_destroy(engine* ptr) noexcept { delete ptr; }
+}
+int main() {
+    engine* ptr = nullptr;
+    assert(engine_create(&ptr) == 0);
+    int value = 0;
+    assert(engine_read(ptr, &value) == 0 && value == 42);
+    engine_destroy(ptr);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Najpierw zerujemy parametr wyjściowy, więc po niepowodzeniu klient otrzymuje znany stan. Alokacja i zwolnienie są wykonywane przez tę samą implementację. W rzeczywistym nagłówku przeznaczonym dla C należałoby oddzielić deklarację niekompletnego `struct engine`, zastosować osłonę `__cplusplus` dla linkage i dostosować składnię deklaracji. Pokazany blok jest samowystarczalną jednostką C++ demonstrującą warstwę implementacji.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „ODR, moduły, FFI i interoperacyjność”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Dla biblioteki budowanej razem z aplikacją bogate typy C++ mogą być właściwym interfejsem. Dla pluginów różnych dostawców mały interfejs C z numerem wersji i opaque handles zwykle daje bardziej kontrolowaną granicę. Kosztem jest ręczna reprezentacja błędów i zasobów, którą warto ponownie opakować w RAII po stronie C++.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy sprawdzenie `ptr != nullptr` w `engine_read` dowodzi poprawności uchwytu? **Odpowiedź:** nie; klient musi przekazać żywy uchwyt właściwego pochodzenia. Czy `extern "C" std::string name()` ustanawia stabilny interfejs C? Nie; linkage funkcji nie zmienia reprezentacji ani dostępności typu. Czy poprawne linkowanie dowodzi ODR? Nie, wiele naruszeń nie wymaga diagnostyki.
+
+Źródła: [N4950: ODR](https://timsong-cpp.github.io/cppwp/n4950/basic.def.odr), [language linkage](https://timsong-cpp.github.io/cppwp/n4950/dcl.link) oraz [moduły](https://timsong-cpp.github.io/cppwp/n4950/module).
+
+### Wersjonowanie kontraktu binarnego
+
+Rozszerzalna struktura opcji często zawiera pole wersji lub rozmiaru oraz jawnie określone wartości domyślne. Biblioteka może wtedy rozpoznać starszego klienta i odczytać tylko pola obecne w jego strukturze. Wymaga to dokumentacji wyrównania, szerokości typów i odpowiedniej walidacji. Samo dopisanie pola na końcu nie gwarantuje bezpieczeństwa, jeśli funkcja bezwarunkowo odczytuje nowy pełny rozmiar ze starego bufora.
+
+Wskaźnik zwrócony jako tekst może oznaczać pamięć klienta, pamięć biblioteki lub widok ważny tylko do następnego wywołania. Te modele potrzebują różnych zasad zwalniania. Najbardziej niebezpieczny interfejs pozostawia odbiorcy zgadywanie, czy użyć `free`, `delete[]` czy żadnej operacji. Para funkcji alokującej i zwalniającej lub zapis do bufora dostarczonego przez klienta upraszcza kontrakt.
+
+Callback przekraczający granicę języka powinien przechwycić wyjątki jeszcze przed powrotem do obcego runtime. Jego `userdata` musi pozostać żywe do zakończenia wszystkich możliwych wywołań, również tych będących już w toku. Funkcja odrejestrowania powinna wyraźnie określać, czy czeka na aktywne callbacki; bez tego klient nie wie, kiedy bezpiecznie zniszczyć kontekst.
 
 ## Powiązane tematy
 

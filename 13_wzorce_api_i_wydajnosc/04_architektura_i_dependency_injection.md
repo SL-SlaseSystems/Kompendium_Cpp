@@ -45,39 +45,62 @@ Nie twórz interfejsu dla każdej klasy. Oddzielaj granice I/O, czasu, losowośc
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Architektura i dependency injection”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz ustanowienie kontraktu typu, rozdzielenie interfejsu od implementacji, wykonanie operacji i zmierzenie kosztu na granicy abstrakcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie domenowe od mechanizmu implementacyjnego, publiczne ABI od prywatnego layoutu i hipotezę wydajności od pomiaru. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź przykładowe użycie API, rozmiar i layout typu, symbole biblioteki, profil CPU oraz liczbę alokacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym programie `RecordingLogger` powstaje przed `Service`. Serwis przechowuje referencję, więc nie tworzy ani nie niszczy loggera. `run()` wywołuje operację interfejsu, a dynamiczny typ wybiera zapis do pamięci testu. Po zakończeniu `main` obiekty są niszczone w odwrotnej kolejności, co odpowiada zależności lifetime.
 
-Model dla tej części kompendium jest następujący: Projektowanie C++ łączy semantykę wartości, własność, stabilność ABI i koszt abstrakcji. Dobra abstrakcja utrudnia niewłaściwe użycie, ale pozostawia kompilatorowi wystarczającą informację do optymalizacji. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W większej aplikacji rozrysuj graf zależności. Właściciele powinni powstawać przed obserwatorami, a zakończenie operacji asynchronicznych powinno nastąpić przed zniszczeniem usług, z których korzystają. Composition root jest miejscem składania tych zależności. Jeśli obiekt sam pobiera wszystko z globalnego rejestru, jego konstruktor przestaje ujawniać rzeczywiste wymagania.
 
 ## Pogłębienie mechanizmu
 
-- Dependency injection przekazuje zależność przez konstruktor lub funkcję zamiast wybierać globalny singleton wewnątrz logiki. Interfejs może być konceptem, wartością funkcyjną albo polimorficzną bazą zależnie od potrzeb kompilacji i runtime.
+Dependency injection nie wymaga kontenera DI ani dziedziczenia. Parametr funkcji może dostarczyć źródło czasu, a wartość obiektu funkcyjnego politykę przeliczania. Wirtualny interfejs jest przydatny, gdy implementacje trzeba wybierać podczas wykonania. Szablon pasuje, gdy wybór jest znany przy kompilacji. Referencja do konkretnego typu również jest wstrzyknięciem zależności, jeśli wywołujący ją dostarcza.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Architektura i dependency injection” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Ważna jest granica efektów. Obliczenie ceny na podstawie danych może być zwykłą funkcją, a pobieranie kursu z sieci osobną zależnością. Test obliczenia nie potrzebuje wtedy uruchamiania klienta HTTP. Nie oznacza to rezygnacji z testów integracyjnych: adapter sieciowy nadal trzeba sprawdzić względem rzeczywistego protokołu.
+
+Fake zwracający kontrolowane dane pozwala sprawdzić wynik, podczas gdy mock często weryfikuje sekwencję interakcji. Nadmierne sprawdzanie wewnętrznej kolejności wywołań może utrudnić poprawne refaktoryzacje. Testuj tę sekwencję tylko wtedy, gdy sama stanowi wymaganie, na przykład zatwierdzenie po udanym zapisie, a nie przed nim.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <chrono>
+#include <utility>
 
-~~~text
-Temat: Architektura i dependency injection
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+using Clock = std::chrono::steady_clock;
+
+template<class Now>
+class Deadline {
+    Now now_;
+    Clock::time_point end_;
+public:
+    Deadline(Now now, Clock::duration timeout)
+        : now_{std::move(now)}, end_{now_() + timeout} {}
+    bool expired() const { return now_() >= end_; }
+};
+
+int main() {
+    using namespace std::chrono_literals;
+    auto current = Clock::time_point{};
+    Deadline deadline{[&current] { return current; }, 5s};
+    assert(!deadline.expired());
+    current += 4999ms;
+    assert(!deadline.expired());
+    current += 1ms;
+    assert(deadline.expired());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Test kontroluje czas przez referencję do lokalnej wartości i nie usypia wątku. Granica jest jawna: termin jest przekroczony także przy równości. Lambda oraz `current` żyją przez cały okres użycia `Deadline`. W kodzie aplikacji tę samą rolę może pełnić lambda zwracająca `steady_clock::now()`. Szablon nie narzuca globalnego mechanizmu konfiguracji czasu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Architektura i dependency injection”, oceniaj łatwość poprawnego użycia, value semantics, stabilność kontraktu, koszt kompilacji i zmierzona wydajność krytycznej ścieżki. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Przekazanie przez wartość daje serwisowi własną zależność, referencja zapewnia obserwację obiektu żyjącego gdzie indziej, a `unique_ptr` przekazuje wyłączną własność. `shared_ptr` ma sens wtedy, gdy różni uczestnicy rzeczywiście ustalają wspólny koniec życia. Jego użycie do każdej zależności może ukryć cykle i uniemożliwić przewidywalną kolejność sprzątania.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Interfejs powinien opisywać potrzebę klienta. Jeżeli serwis potrzebuje jedynie odczytu bieżącego czasu, nie wstrzykuj ogromnego obiektu aplikacji zawierającego sieć, bazę i konfigurację. Mała zależność ogranicza sprzężenie i liczbę stanów testu. Jednocześnie nie rozbijaj stabilnej funkcji matematycznej na sztuczne interfejsy wyłącznie dla formalnej zgodności ze wzorcem.
+
+## Ćwiczenie z odpowiedzią
+
+Czy zastąpienie lambdy `[&current]` przez `[current]` zachowa działanie testu? Nie: kopia będzie stale zwracać początkowy czas, więc zmiany zewnętrznej zmiennej przestaną wpływać na deadline. Czy użycie referencji zawsze jest lepsze? Nie, bo wymaga dostatecznie długiego życia `current`. Dobór własności wynika z zamierzonego zachowania, a nie nazwy wzorca.
+
+Dodatkowe kryteria projektowania interfejsów i zarządzania zasobami: [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines). Przykład pokazuje jedną możliwą architekturę, nie obowiązkowy model języka.
 
 ## Powiązane tematy
 

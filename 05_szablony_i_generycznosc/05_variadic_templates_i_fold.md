@@ -35,39 +35,65 @@ Przy forwardowaniu używa się `T&&` w kontekście dedukowanym oraz `std::forwar
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Variadic templates i fold expressions”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zebranie argumentów, dedukcję parametrów, sprawdzenie ograniczeń, wybór specjalizacji i instancjację użytej postaci. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd substytucji, niespełnione constraint i błąd wewnątrz już wybranej instancji. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wydedukowane typy, zbiór kandydatów, spełnione constraints oraz minimalną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W `template<class... Numbers>` nazwa `Numbers` oznacza pakiet typów. Parametry `Numbers... numbers` tworzą odpowiadający mu pakiet argumentów funkcji. Wywołanie `sum(1, 2, 3)` dedukuje trzy typy `int`. Fold `(numbers + ... + 0)` rozwija się jak `1 + (2 + (3 + 0))`, ponieważ jest prawostronny. Nie tworzy ukrytej kolekcji ani pętli po obiektach jednego wspólnego typu.
 
-Model dla tej części kompendium jest następujący: Szablon jest przepisem na deklaracje zależne od argumentów, a nie kodem wykonywanym w runtime. Dedukcja, lookup, ograniczenia i instancjacja zachodzą w różnych momentach; pomieszanie tych faz prowadzi do trudnych diagnostyk. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Rozwinięcie pakietu powtarza wzorzec zawierający nieprzetworzony pakiet. W `std::forward<Parts>(parts)...` wzorcem jest całe wywołanie `forward`, więc każdy argument otrzymuje odpowiadający mu parametr typu. Jeżeli jeden wzorzec równocześnie rozwija dwa pakiety, ich długości muszą być zgodne. Wielokropek nie oznacza dowolnego automatycznego zestawiania wszystkich kombinacji.
+
+W `join` fold po przecinku wykonuje kolejne `append`. Dla wbudowanego operatora przecinka lewa operacja jest sekwencjonowana przed prawą, więc znaki trafiają w przewidzianej kolejności. To gwarancja użytego operatora, a nie ogólna własność rozwijania pakietów. Przekazanie rozwiniętych wywołań jako argumentów innej funkcji nadal podlega regułom kolejności argumentów funkcji.
 
 ## Pogłębienie mechanizmu
 
-- Parameter pack reprezentuje zero lub więcej argumentów, a fold expression redukuje rozwinięcie przez operator z określoną łącznością. Przypadek pustego packa zależy od operatora i obecności wartości początkowej.
+Unary left fold ma postać `(... op pack)` i grupuje od lewej. Unary right fold `(pack op ...)` grupuje od prawej. Binary fold dodaje jawny element początkowy po odpowiedniej stronie. Dla odejmowania, dzielenia, konkatenacji o asymetrycznych przeciążeniach lub liczb zmiennoprzecinkowych kierunek może zmieniać wynik. Łączność nie jest kosmetycznym wyborem składni.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Variadic templates i fold expressions” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Dla pustego pakietu unary fold jest zdefiniowany tylko dla określonych operatorów: `&&` daje prawdę, `||` fałsz, a przecinek `void()`. Puste sumowanie wymaga inicjalizatora albo osobnej obsługi. Wybór `0` narzuca jednak typ `int` na wynik pustej sumy i uczestniczy w konwersjach sumy niepustej. Dla typów domenowych potrzebny może być element neutralny jawnie podany przez wywołującego.
+
+Złożenie po wbudowanym `&&` i `||` zachowuje krótkie spięcie podczas wykonania. Mimo to wyrażenia dla wszystkich elementów muszą być poprawne podczas instancjacji. Wcześniejszy runtime'owy wynik fałszywy nie ukryje błędnego operatora dla późniejszego typu. Do rozdzielania implementacji zależnych od typu służą constraints i `if constexpr`.
+
+Forwarding reference powstaje z `T&&` przy dedukowanym parametrze typu w odpowiednim kontekście. `const T&&` nie jest tym samym mechanizmem. Nazwane `parts` pozostają lvalue, dlatego forwarding jest jawny. Przekazanie rvalue dalej nie musi oznaczać ruchu, lecz pozwala odbiorcy wybrać ruch. Jeżeli ten sam argument zostanie przekazany jako rvalue dwa razy, drugie użycie może zobaczyć stan po pierwszym przejęciu zasobu.
+
+Do rozpakowywania krotki według indeksów służą `index_sequence` i `make_index_sequence`, a `std::apply` często usuwa konieczność pisania tej infrastruktury. Są przydatne, gdy dane już istnieją w `tuple`; pakiet parametrów jest natomiast konstrukcją szablonu. Nie można traktować pakietu dokładnie jak wektora i indeksować go zwykłą zmienną runtime w C++23.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Dwa foldy z tymi samymi liczbami pokazują wpływ grupowania. Trzeci używa konwersji do `void`, aby świadomie wybrać wbudowany przecinek i wykonywać kolejne operacje w kolejności pakietu.
 
-~~~text
-Temat: Variadic templates i fold expressions
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <vector>
+
+template<class... T>
+int subtract_left(T... values) { return (10 - ... - values); }
+
+template<class... T>
+int subtract_right(T... values) { return (values - ... - 10); }
+
+template<class... T>
+void append(std::vector<int>& target, T... values) {
+    (static_cast<void>(target.push_back(values)), ...);
+}
+
+int main() {
+    assert(subtract_left(1, 2, 3) == 4);
+    assert(subtract_right(1, 2, 3) == -8);
+    assert(subtract_left() == 10);
+    std::vector<int> values;
+    append(values, 3, 1, 4);
+    append(values);
+    assert((values == std::vector{3, 1, 4}));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Lewy wynik to `((10 - 1) - 2) - 3`. Prawy to `1 - (2 - (3 - 10))`. Kolejność zapisanych liczb nie zmienia się, lecz nawiasowanie zmienia sens działania. Dla dodawania liczb rzeczywistych reprezentowanych przybliżeniem również nie wolno zakładać matematycznej łączności.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Variadic templates i fold expressions”, oceniaj czytelny kontrakt, krótka diagnostyka, ograniczona liczba instancji i brak metaprogramowania bez wartości dla użytkownika API. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj pakiet, gdy liczba i typy argumentów są znane podczas kompilacji i mogą się różnić. Wybieraj kontener lub `span`, gdy liczba danych pochodzi z wejścia runtime. Fold upraszcza jednorodne działanie operatorem, ale bardziej złożona obsługa argumentów może być czytelniejsza jako lambda wywoływana kolejno dla każdego elementu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `(check(values) && ...)` wywoła `check` dla wszystkich argumentów, jeśli pierwsze sprawdzenie zwróci fałsz?
+
+**Odpowiedź.** Nie, o ile używany jest wbudowany `&&`. Kolejne wywołania zostaną pominięte. Nadal jednak każde z nich musi być poprawnym wyrażeniem dla swojego typu, ponieważ kompilator tworzy cały odpowiedni kod przed jego wykonaniem.
+
+Źródła: [pakiety parametrów](https://timsong-cpp.github.io/cppwp/n4950/temp.variadic), [fold expressions](https://timsong-cpp.github.io/cppwp/n4950/expr.prim.fold), [instancjacja foldów](https://timsong-cpp.github.io/cppwp/n4950/temp.variadic#9).
 
 ## Powiązane tematy
 

@@ -34,39 +34,60 @@ Standard-layout daje ograniczone gwarancje interoperacyjności i layoutu, a triv
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Layout, alignment, padding i triviality”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Kompilator wyznacza układ `PacketHeader`, uwzględniając wymagania pól i całego obiektu. Pierwsze pole obiektu standard-layout leży na jego początku; stąd poprawna asercja z `offsetof`. Pozostałe przesunięcia mogą zawierać padding. Końcowy padding pozwala tworzyć tablicę, w której każdy następny obiekt zaczyna się pod odpowiednio wyrównanym adresem. Rozmiar obiektu i liczba znaczących bajtów jego danych nie są zatem tym samym.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Trait `is_standard_layout` mówi o kategorii układu, a `is_trivially_copyable` o dozwolonych operacjach na reprezentacji. Te własności są niezależnymi pytaniami. Typ z prywatnymi polami może być trivially copyable, a typ z nietrywialnym konstruktorem inicjalizującym wartości może nadal mieć trywialne kopiowanie. Nie zastępuj zestawu potrzebnych własności historycznym, szerokim słowem POD.
 
 ## Pogłębienie mechanizmu
 
-- Alignment może wprowadzać padding między polami i na końcu obiektu, dlatego suma `sizeof` członów nie wyznacza layoutu klasy. Trivially copyable umożliwia określone kopiowanie reprezentacji bajtowej, ale nie dowolną serializację między ABI.
+Dla obiektu trivially copyable, który nie jest potentially-overlapping subobject, można zapisać jego bajty do tablicy odpowiedniego typu znakowego lub `std::byte`, a następnie odtworzyć je, odzyskując pierwotną wartość. Podobnie kopiowanie reprezentacji między odrębnymi obiektami tego samego typu ma określone gwarancje. Nie wynika stąd legalność surowego kopiowania `std::string`: skopiowane wewnętrzne wskaźniki mogłyby spowodować podwójne zwolnienie pamięci.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Layout, alignment, padding i triviality” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`memcmp` nie jest ogólną implementacją równości obiektów. Dwie wartości mogą mieć różny padding, a wartości zmiennoprzecinkowe wymagają szczególnej semantyki dla zera i NaN. Nawet trait `has_unique_object_representations` nie ustanawia formatu sieciowego ani trwałości wskaźników po ponownym uruchomieniu programu. Serializacja powinna opisywać znaczenie pól, szerokości, kolejność bajtów i walidację wejścia, zamiast kopiować obraz procesu.
+
+`alignas(64)` podnosi wymaganie wyrównania, jeśli implementacja obsługuje taką wartość. Nie dowodzi, że rozmiar linii cache wynosi 64 bajty, ani że dwa pola znajdą się w różnych liniach. ABI może umieszczać dodatkowe dane w klasach polimorficznych, a wynik `sizeof` zmieni się po dodaniu funkcji wirtualnej. Taką zmianę traktuj jako potencjalne zerwanie binarnej zgodności, nawet gdy publiczne nazwy metod pozostały identyczne.
+
+Pole `[[no_unique_address]]` jest potentially-overlapping subobject, również gdy nie jest puste. Implementacja może wykorzystywać jego tail padding do przechowywania innych danych. Nie wolno zatem bez dodatkowego dowodu kopiować `sizeof(pole)` bajtów takiego podobiektu jak niezależnego kompletnego obiektu. Dwa puste podobiekty tego samego typu podlegają ponadto ograniczeniom tożsamości adresów; atrybut nie obiecuje zawsze zerowego kosztu przestrzennego.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
 
-~~~text
-Temat: Layout, alignment, padding i triviality
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct Reading { int channel; double value; };
+int main() {
+    static_assert(std::is_trivially_copyable_v<Reading>);
+    Reading source{3, 4.5};
+    std::array<std::byte, sizeof(Reading)> saved{};
+    std::memcpy(saved.data(), &source, sizeof source);
+    source = {9, 1.0};
+    std::memcpy(&source, saved.data(), sizeof source);
+    assert(source.channel == 3 && source.value == 4.5);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Najpierw kopiujemy reprezentację żywego obiektu do tablicy bajtów. Następnie zmieniamy jego pola zwykłym przypisaniem, a na końcu odtwarzamy dokładnie zapisane bajty. Kod nie interpretuje paddingu i nie przesyła danych na inną platformę. Nie zakłada też konkretnego `sizeof(Reading)`; rozmiar jest obliczony dla bieżącej implementacji. Gwarancja dotyczy odzyskania wartości w tym kontrolowanym scenariuszu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Layout, alignment, padding i triviality”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Przestawienie pól od największego do najmniejszego często zmniejsza padding, ale najpierw sprawdź raport układu i rzeczywisty rozmiar. W interfejsie publicznym taka zmiana może zmieniać offsety i ABI. W kodzie obliczeniowym osobne tablice pól mogą dać większą korzyść niż minimalizacja `sizeof` pojedynczego obiektu. Rozmiar nie mierzy liczby transferów cache potrzebnych przez konkretny algorytm.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `static_assert(sizeof(Header) == 8)` udowadnia przenośność protokołu? **Odpowiedź:** sprawdza jedynie rozmiar w bieżącej konfiguracji. Nie sprawdza kolejności bajtów, znaczenia bitów ani poprawności wszystkich reprezentacji. Czy packed struct rozwiązuje problem? Atrybut pakowania jest rozszerzeniem i może tworzyć niewyrównane pola; nadal nie ustala endianowości ani stabilności typów. Format bajtowy należy zdefiniować niezależnie od układu obiektu.
+
+Źródła: [N4950: reprezentacja typów](https://timsong-cpp.github.io/cppwp/n4950/basic.types), [alignment](https://timsong-cpp.github.io/cppwp/n4950/basic.align) i [bit_cast](https://timsong-cpp.github.io/cppwp/n4950/bit.cast).
+
+### Układ klasy a ewolucja interfejsu
+
+Dodanie nawet pustego pola może zmienić rozmiar klasy, jej alignment lub klasyfikację przekazywania argumentów w ABI. Publiczna funkcja przyjmująca taką klasę przez wartość może wtedy wymagać innego kodu wywołania. Sprawdzanie wyłącznie listy eksportowanych symboli nie ujawni całej zmiany. Zestaw testów zgodności powinien obejmować reprezentację typów, sygnatury i scenariusz współpracy starego klienta z nową biblioteką.
+
+C++23 wzmacnia określone gwarancje kolejności niestatycznych składowych, ale nie gwarantuje braku przerw między polami ani identycznego układu dla różnych kompilatorów. `offsetof` jest najprostszy do przenośnego użycia dla standard-layout; jego stosowanie do innych klas jest conditionally-supported. Dziedziczenie wirtualne i funkcje wirtualne powinny od razu skłaniać do konsultacji konkretnego ABI, zamiast obliczania offsetów z intuicji.
+
+Jeśli aplikacja wymaga konkretnego rozmiaru ramki sieciowej, utwórz tablicę bajtów tego rozmiaru i jawnie koduj pola. Wtedy test rozmiaru sprawdza format, a nie przypadkowy układ klasy. Wewnętrzna klasa może korzystać z wygodnych typów i dodatkowych inwariantów, a adapter formatu odpowiada za obcięcie, zakres i endianowość każdego pola.
+
+Bit-fields wymagają osobnej analizy: implementacja określa szczegóły przydziału i rozmieszczenia bitów, a pól bitowych nie można adresować jak zwykłych składowych. Nie stanowią więc przenośnego sposobu opisania bitów w pakiecie. Jawne maski i przesunięcia na typach unsigned lepiej oddzielają znaczenie protokołu od layoutu kompilatora.
 
 ## Powiązane tematy
 

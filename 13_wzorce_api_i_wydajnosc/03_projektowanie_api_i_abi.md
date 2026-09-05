@@ -6,6 +6,8 @@ Publiczne API obejmuje nazwy, typy, preconditions, ownership, błędy, złożono
 
 ~~~cpp
 #include <cassert>
+#include <limits>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <string_view>
@@ -14,10 +16,18 @@ Publiczne API obejmuje nazwy, typy, preconditions, ownership, błędy, złożono
 class Report {
 public:
     explicit Report(std::string title) : title_{std::move(title)} {}
-    [[nodiscard]] std::string_view title() const noexcept { return title_; }
-    [[nodiscard]] int sum(std::span<const int> values) const noexcept {
+    [[nodiscard]] std::string_view title() const & noexcept { return title_; }
+    [[nodiscard]] std::string title() && { return std::move(title_); }
+    [[nodiscard]] std::string title() const && { return title_; }
+    [[nodiscard]] int sum(std::span<const int> values) const {
         int result = 0;
-        for (int value : values) result += value;
+        for (int value : values) {
+            if ((value > 0 && result > std::numeric_limits<int>::max() - value) ||
+                (value < 0 && result < std::numeric_limits<int>::min() - value)) {
+                throw std::overflow_error("sum outside int range");
+            }
+            result += value;
+        }
         return result;
     }
 
@@ -32,7 +42,7 @@ int main() {
 }
 ~~~
 
-Parametr `string` przez wartość jest dobry, gdy obiekt przejmuje dane; klient może skopiować lvalue lub przenieść rvalue. `string_view` jest dobry dla synchronicznego odczytu bez przechowania, a `span` dla ciągłego zakresu. Zwracany widok wiąże lifetime z `Report`, co musi być częścią kontraktu.
+Parametr `string` przez wartość jest dobry, gdy obiekt przejmuje dane; klient może skopiować lvalue lub przenieść rvalue. `string_view` jest dobry dla synchronicznego odczytu bez przechowania, a `span` dla ciągłego zakresu. Widok zwracany z lvalue wiąże lifetime z `Report`; wywołanie na rvalue zwraca posiadający napis. Sumowanie sprawdza zakres przed każdym dodaniem i zgłasza `overflow_error`, zamiast dopuszczać signed overflow.
 
 Minimalizuj publiczne zależności i liczbę typów ujawnionych w nagłówku. Dodanie pola private zmienia layout i może złamać ABI klientów; PImpl pomaga, ale nie rozwiązuje wszystkich zmian. Eksport symboli kontroluj atrybutami lub mapą visibility specyficzną dla platformy.
 
@@ -40,39 +50,60 @@ Stabilna granica pluginu często używa C ABI, opaque handles, jawnych wersji st
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Projektowanie API i ABI”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz ustanowienie kontraktu typu, rozdzielenie interfejsu od implementacji, wykonanie operacji i zmierzenie kosztu na granicy abstrakcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie domenowe od mechanizmu implementacyjnego, publiczne ABI od prywatnego layoutu i hipotezę wydajności od pomiaru. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź przykładowe użycie API, rozmiar i layout typu, symbole biblioteki, profil CPU oraz liczbę alokacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Projektuj sygnaturę od perspektywy wywołującego. Jeśli operacja tylko czyta tekst podczas wywołania, `string_view` komunikuje tani widok. Jeśli przechowuje tekst po powrocie, musi skopiować dane lub przyjąć ich właściciela. Następnie określ wynik: wartość może żyć niezależnie, ale referencja lub widok wiążą się z czasem życia innego obiektu i jego przyszłymi modyfikacjami.
 
-Model dla tej części kompendium jest następujący: Projektowanie C++ łączy semantykę wartości, własność, stabilność ABI i koszt abstrakcji. Dobra abstrakcja utrudnia niewłaściwe użycie, ale pozostawia kompilatorowi wystarczającą informację do optymalizacji. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Dopisz wymagania dotyczące błędu, zakresu danych i współbieżności. `noexcept` mówi o wyjątkach opuszczających funkcję, nie o braku błędów, overflow czy data race. Sygnatura sumująca dowolny zakres `int` wymaga reguły dla wyniku poza zakresem. Publiczny kontrakt powinien pozwolić klientowi spełnić wymagania bez czytania implementacji.
 
 ## Pogłębienie mechanizmu
 
-- API opisuje kontrakt źródłowy, a ABI layout, mangling, calling convention i binarną zgodność. Zmiana prywatnego pola może złamać ABI klasy eksportowanej, choć kod klientów nadal kompilowałby się ze źródeł.
+Zgodność źródłowa oznacza możliwość ponownego skompilowania klienta. Zgodność binarna oznacza współpracę istniejących artefaktów w ustalonej konfiguracji. Dodanie przeciążenia może zmienić wybór funkcji lub spowodować niejednoznaczność po rekompilacji. Dodanie prywatnego pola może zachować wywołania źródłowe, ale zmienić rozmiar i przesunięcia w pamięci. „Private” nie oznacza niewidzialności dla ABI.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Projektowanie API i ABI” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Domyślne argumenty są używane w miejscu wywołania. Zmiana ich wartości w nagłówku nie musi zmienić zachowania starego klienta bez przebudowania. Podobnie kod inline może pozostawać w istniejących plikach binarnych. Aktualizacja samej biblioteki dynamicznej nie zawsze aktualizuje całą semantykę publicznego API.
+
+Przy granicy pluginów określ właściciela każdej alokacji, wersję interfejsu i sposób przekazywania błędu. `extern "C"` wpływa na language linkage; nie standaryzuje automatycznie layoutu każdej struktury, szerokości typów i konwencji całej platformy. Opaque handle plus funkcja niszcząca po stronie biblioteki ogranicza zależność klienta od jej wewnętrznych klas.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 
-~~~text
-Temat: Projektowanie API i ABI
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+class Label {
+    std::string text_;
+public:
+    explicit Label(std::string text) : text_{std::move(text)} {}
+    std::string_view text() const & noexcept { return text_; }
+    std::string text() && { return std::move(text_); }
+    std::string text() const && { return text_; }
+};
+
+int main() {
+    const Label named{"trwaly obiekt"};
+    auto view = named.text();
+    auto owned = Label{"tymczasowy obiekt"}.text();
+    static_assert(std::is_same_v<decltype(view), std::string_view>);
+    static_assert(std::is_same_v<decltype(owned), std::string>);
+    assert(view == "trwaly obiekt");
+    assert(owned == "tymczasowy obiekt");
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Wywołanie na lvalue zwraca widok, a na rvalue wartość posiadającą tekst. Osobne `const &&` uwzględnia także niemodyfikowalny obiekt tymczasowy, z którego tekst trzeba skopiować. Ten projekt ogranicza typowy błąd widoku do już zniszczonego tymczasowego właściciela. Nadal można błędnie przechować widok z `named` dłużej niż samo `named`, więc dokumentacja lifetime pozostaje potrzebna.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Projektowanie API i ABI”, oceniaj łatwość poprawnego użycia, value semantics, stabilność kontraktu, koszt kompilacji i zmierzona wydajność krytycznej ścieżki. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Dla wewnętrznego API rekompilowanego razem z aplikacją zwykłe typy standardowe często zapewniają najlepszą czytelność. Dla dostarczanej biblioteki binarnej określ wspierane kombinacje kompilatora, biblioteki, flag i platform. Dla granicy procesów użyj formatu komunikacji, a nie zależności od layoutu obiektów w jednym procesie.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Silne typy domenowe, na przykład oddzielne `UserId` i `InvoiceId`, pomagają odrzucić zamianę argumentów, której dwa parametry `uint64_t` nie wykryją. `[[nodiscard]]` przypomina o wyniku wymagającym uwagi, ale zwykle jest mechanizmem diagnostycznym, a nie niemożliwym do obejścia przymusem. Projektuj typy tak, aby prawidłowe użycie było łatwe do zapisania.
+
+## Ćwiczenie z odpowiedzią
+
+Dlaczego `auto text = Report{"Q1"}.title();` jest groźne, jeśli `title` zwraca zawsze `string_view`? Tymczasowy `Report` kończy życie po pełnym wyrażeniu, a `text` przechowuje już tylko widok. Kopia widoku nie kopiuje napisu. Rozwiązaniem jest wartość, zakaz takiego wywołania lub przeciążenia zależne od kategorii obiektu.
+
+Źródło przykładowego, konkretnego ABI: [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html). Jego reguły nie są uniwersalną gwarancją ISO C++.
 
 ## Powiązane tematy
 

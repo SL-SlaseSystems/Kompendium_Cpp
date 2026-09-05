@@ -30,47 +30,73 @@ Debugger, np. GDB, LLDB albo debugger Visual Studio, pozwala zatrzymać program,
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Sanitizery i debuggery”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz sformułowanie hipotezy, przygotowanie kontrolowanego wejścia, zebranie wyniku, porównanie z oczekiwaniem i zachowanie reprodukcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd funkcjonalny, undefined behavior, problem przenośności i regresję wydajności, ponieważ wymagają innych narzędzi. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przypadek, kod wyjścia, raport sanitizera, statystyczny rozkład pomiarów i konfigurację kompilacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+AddressSanitizer dodaje do operacji pamięci sprawdzenia korzystające z pomocniczego stanu pamięci. Regiony za granicami alokacji lub po zwolnieniu mogą być oznaczone jako niedostępne. Dostęp do takiego miejsca powoduje raport zawierający stos błędnej operacji, a często również miejsce wcześniejszej alokacji i zwolnienia. Pierwszy zgłoszony błąd warto naprawić przed analizowaniem dalszych skutków, ponieważ po uszkodzeniu pamięci kolejne objawy mogą być wtórne.
 
-Model dla tej części kompendium jest następujący: Żadne pojedyncze narzędzie nie dowodzi poprawności programu C++. Test sprawdza zachowanie dla danych, analiza statyczna szuka wzorców, sanitizer obserwuje wykonanie, a profiler mierzy koszt; wiarygodność daje dopiero połączenie niezależnych dowodów. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Kompiluj wszystkie własne jednostki wymagające obserwacji z właściwą instrumentacją i linkuj przez sterownik kompilatora, który dobierze runtime. Sama flaga na końcowym linkowaniu nie doda sprawdzeń do wcześniej skompilowanych instrukcji. Dla biblioteki budowanej osobno sprawdź konfigurację tego targetu, a nie tylko ustawienia programu głównego.
+
+Gdy raport jest zrozumiały, zamień przypadek na mały test regresyjny. Ustal rzeczywistą przyczynę: zły indeks, wygasły właściciel czy niespójny protokół synchronizacji. Dodanie opóźnienia albo zwiększenie pojemności bufora może zmienić objaw bez naprawienia reguły. Ponownie uruchom przypadek oraz istotne sąsiednie scenariusze z tym samym sanitizatorem.
 
 ## Pogłębienie mechanizmu
 
-- ASan wykrywa wiele naruszeń pamięci, UBSan instrumentuje wybrane UB, a TSan szuka data races. Instrumentacje zmieniają timing i nie pokrywają wszystkich błędów, ale raport z reprodukcją jest silniejszy niż sam crash.
+ASan przede wszystkim kontroluje dostępność pamięci, a nie wszystkie semantyczne wymagania kontenerów. Zapis poza `vector.size()`, lecz wewnątrz zaalokowanej pojemności, może wymagać dodatkowych adnotacji biblioteki, aby został wykryty. Brak raportu nie legalizuje takiego dostępu. Analogicznie iterator może być logicznie unieważniony, mimo że jego dawny adres leży w nadal dostępnej alokacji.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Sanitizery i debuggery” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+UBSan obejmuje wybrane klasy, np. pewne przepełnienia signed, niewłaściwe wyrównanie i niepoprawne operacje arytmetyczne. Nie jest pełnym interpreterem wszystkich reguł standardu. Zawijanie arytmetyki unsigned jest zwykle zachowaniem zdefiniowanym; jego dodatkowe sprawdzanie należy do innych ustawień narzędzia. Ważne jest rozróżnienie błędu domenowego od konkretnej kategorii UB wykrywanej daną flagą.
+
+TSan śledzi konflikty dostępów i synchronizację między wątkami. Standardowa osobna konfiguracja `-fsanitize=thread` nie jest łączona z ASan w jednym typowym buildzie Clang. Zmiana harmonogramu przez instrumentację jest naturalna; test musi sprawdzać protokół, a nie milisekundowe opóźnienia. Własne prymitywy synchronizacji i nieinstrumentowane biblioteki wymagają uwzględnienia ograniczeń narzędzia.
+
+MemorySanitizer śledzi niezainicjalizowane wartości i wymaga odpowiednio przygotowanych zależności oraz wspieranej platformy. Nie zakładaj jego dostępności na macOS tylko dlatego, że działa ASan. Debugger daje inną możliwość: zatrzymanie na konkretnej instrukcji i obserwację rzeczywistego stanu. Przy optymalizacji pojedyncza linia źródła nie odpowiada zawsze jednemu uporządkowanemu fragmentowi instrukcji maszynowych.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniższy program ma zdefiniowane zachowanie i zgłasza kontrolowany wyjątek. Pozwala przećwiczyć debugger bez polegania na przypadkowym objawie undefined behavior.
 
-~~~text
-Temat: Sanitizery i debuggery
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <stdexcept>
+#include <vector>
+
+int read_item(const std::vector<int>& values, std::size_t index) {
+    return values.at(index);
+}
+
+int main() {
+    const std::vector<int> values{10, 20};
+    bool rejected = false;
+    try {
+        (void)read_item(values, values.size());
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    assert(rejected);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+~~~text
+clang++ -std=c++23 -g -O0 example.cpp -o example
+lldb ./example
+(lldb) breakpoint set --name read_item
+(lldb) run
+(lldb) frame variable index values
+(lldb) thread backtrace
+(lldb) next
+(lldb) continue
+~~~
+
+Po zatrzymaniu indeks wynosi dwa, a kontener ma dwa elementy, więc dozwolone indeksy to zero i jeden. `at` kontroluje wymaganie i rzuca. ASan nie powinien raportować błędu pamięci dla tego poprawnego programu. Zastąpienie `at` przez `operator[]` usunęłoby walidację i naruszyło kontrakt; to zmiana semantyki, a nie tylko usunięcie kosztownego sprawdzenia.
+
+Watchpoint przydaje się, gdy wiadomo, która zmienna jest nadpisywana, ale nie wiadomo gdzie. Wymaga adresu żyjącego obiektu i podlega ograniczeniom sprzętowym. Przy błędzie występującym poza debuggerem zbierz core dump wraz z dokładnie odpowiadającym binarium i symbolami. Inna kompilacja może mieć inne adresy i nie pozwala wiarygodnie odczytać stosu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Sanitizery i debuggery”, oceniaj zdolność wykrycia realnej regresji, powtarzalność, koszt utrzymania testu i reprezentatywność środowiska. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Zaczynaj od narzędzia odpowiadającego klasie objawu: ASan dla pamięci, TSan dla wyścigów, debugger dla konkretnego stanu i przepływu. Uruchamiaj sanitizery na testach o reprezentatywnych wejściach, bo samo zbudowanie instrumentowanego programu niczego jeszcze nie wykrywa. Mierz wydajność osobno: instrumentacja zmienia czas i pamięć, więc jej wyniki nie reprezentują konfiguracji produkcyjnej.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Program przechodzi tysiąc testów pod ASan. Czy można uznać go za pozbawiony data races? **Odpowiedź:** nie. ASan nie jest narzędziem do pełnej analizy wyścigów, a testy pokrywają ograniczone wykonania. Potrzebny jest dowód synchronizacji oraz właściwa konfiguracja TSan tam, gdzie jest wspierana.
 
-## Dobre praktyki
-
-Uruchamiaj sanitizer build w CI na rozbudowanych testach. TSan zwykle działa osobno od ASan. Nie ignoruj raportu tylko dlatego, że program „jeszcze nie crashuje”. Minimalizuj reprodukcję i najpierw napraw źródło naruszenia lifetime lub synchronizacji.
+Źródła: [AddressSanitizer](https://clang.llvm.org/docs/AddressSanitizer.html), [ThreadSanitizer](https://clang.llvm.org/docs/ThreadSanitizer.html), [MemorySanitizer](https://clang.llvm.org/docs/MemorySanitizer.html), [samouczek LLDB](https://lldb.llvm.org/use/tutorial.html).
 
 ## Powiązane tematy
 
 - [Undefined behavior](../zaawansowane/01_undefined_behavior_i_model_maszyny.md)
 - [Atomiki i model pamięci](../10_wspolbieznosc/04_atomiki_i_model_pamieci.md)
 - [Fuzzing](05_fuzzing_i_property_based_testing.md)
-

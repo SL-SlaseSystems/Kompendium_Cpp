@@ -9,6 +9,7 @@ Allocator-aware containers oddzielają politykę pamięci od kontenera. Klasyczn
 ~~~cpp
 #include <array>
 #include <cassert>
+#include <cstddef>
 #include <memory_resource>
 #include <vector>
 
@@ -30,39 +31,62 @@ Placement new i `construct_at` wymagają ręcznego zarządzania lifetime. Implem
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Alokatory, PMR i new/delete”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym przykładzie kolejność deklaracji tworzy bufor, następnie zasób, a na końcu wektor. Destrukcja zachodzi odwrotnie: wektor najpierw niszczy elementy, zasób odzyskuje przydziały, a bufor kończy życie ostatni. To istotna część poprawności. Sam `polymorphic_allocator` przechowuje odniesienie do strategii pamięci, ale nie zarządza lifetime obiektu `memory_resource`.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy `values.assign` kontener pyta zasób o odpowiedni rozmiar i alignment. Arena próbuje obsłużyć żądanie z lokalnego bufora, uwzględniając straty wyrównania. Gdy zabraknie miejsca, domyślnie korzysta z upstream resource. Mała tablica na stosie nie jest więc gwarancją zakazu alokacji dynamicznych. Taki zakaz można wyrazić dopiero przez `null_memory_resource`, który odrzuca dodatkowe żądania wyjątkiem `bad_alloc`.
 
 ## Pogłębienie mechanizmu
 
-- Allocator rozdziela politykę uzyskiwania storage od kontenera, a PMR przenosi wybór resource do runtime. Resource musi żyć dłużej niż wszystkie alokacje, które zostaną przez niego zwolnione.
+Wyrażenie `new T` i funkcja `operator new` mają różne obowiązki. Pierwsze uruchamia konstruktor; druga uzyskuje storage. Jeśli konstruktor rzuci po udanej alokacji, new-expression wywołuje odpowiednią funkcję dealokującą. Kod ręcznie wywołujący `allocate` oraz `construct_at` musi odtworzyć tę ochronę sam. Przy tablicy częściowo skonstruowanej trzeba zniszczyć tylko te elementy, których konstrukcja zakończyła się sukcesem.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Alokatory, PMR i new/delete” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`allocator_traits` ujednolica interfejs alokatorów i określa zachowanie ich propagacji przy kopiowaniu, przenoszeniu i zamianie kontenerów. Przeniesienie wektora nie zawsze oznacza przejęcie trzech wskaźników: gdy alokatory nie propagują się i są nierówne, przydział należy do innego zasobu, więc elementy mogą wymagać osobnego przeniesienia. Warunki `noexcept` i złożoność wynikają z tych zasad, a nie wyłącznie z obecności `std::move`.
+
+Dla PMR kopiowanie kontenera i jawny konstruktor z alokatorem mogą wybierać zasób inaczej. Nie zakładaj, że kopia odziedziczy arenę źródła; zachowanie `select_on_container_copy_construction` dla `polymorphic_allocator` prowadzi do domyślnego zasobu. Zamiana kontenerów z nierównymi alokatorami niepropagującymi alokatora może naruszać kontrakt. Z kolei wewnętrzne napisy użyją tej samej strategii tylko wtedy, gdy ich typ i sposób konstrukcji uczestniczą w protokole uses-allocator; zwykły `std::string` w PMR-wektorze nadal ma własny alokator.
+
+Arena monotoniczna nie odzyskuje indywidualnych bloków. Realokacja wektora zostawia zatem poprzedni blok zajęty aż do `release` lub destrukcji zasobu. `reserve` może ograniczyć szczytowe zużycie pamięci bardziej niż sama zmiana implementacji alokatora. `release` nie wywołuje destruktorów obiektów korzystających z pamięci: najpierw trzeba zakończyć ich życie. Pozostawienie aktywnego wektora po `release` daje wiszące wskaźniki, nawet gdy jego `size()` nadal wygląda rozsądnie.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <memory_resource>
+#include <vector>
 
-~~~text
-Temat: Alokatory, PMR i new/delete
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    alignas(std::max_align_t) std::array<std::byte, 1024> bytes{};
+    std::pmr::monotonic_buffer_resource arena{
+        bytes.data(), bytes.size(), std::pmr::null_memory_resource()};
+    {
+        std::pmr::vector<int> values{&arena};
+        values.reserve(8);
+        values.push_back(42);
+        assert(values.front() == 42);
+    }
+    arena.release();
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Wektor zostaje zniszczony w wewnętrznym zakresie przed zwolnieniem całej areny. Próba przekroczenia dostępnej pojemności zasobu zgłosi `bad_alloc`; nie przejdzie ukradkiem na domyślną stertę. Rozmiar 1024 jest budżetem tego przykładu, nie wyprowadzoną przez standard uniwersalną pojemnością na osiem elementów każdego typu. Wyrównanie oraz polityka konkretnego kontenera mogą wpływać na zużycie storage.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Alokatory, PMR i new/delete”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Arena pasuje do danych o wspólnym końcu życia: drzewa składni, pojedynczego żądania serwera, fazy przetwarzania. Pool lepiej obsługuje wielokrotne zwalnianie i ponowne przydzielanie bloków podobnego rozmiaru. Zasób synchronizowany chroni własne struktury alokatora; nie czyni przechowywanego w nim wektora bezpiecznym współbieżnie. Synchronizacja kontenera pozostaje odrębnym zadaniem.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dlaczego funkcja zwracająca PMR-wektor oparty na lokalnej arenie jest błędna? **Odpowiedź:** zwraca kontener zawierający wskaźniki do pamięci i zasobu, które znikają przy wyjściu. NRVO nie przedłuża życia lokalnej areny. Dlaczego `clear()` nie zeruje wykorzystania areny? Niszczy elementy, lecz wektor zwykle zachowuje pojemność, a arena monotoniczna nie odzyskuje indywidualnych bloków.
+
+Szczegółowe kontrakty: [N4950: memory resources](https://timsong-cpp.github.io/cppwp/n4950/mem.res) i [wymagania alokatorów](https://timsong-cpp.github.io/cppwp/n4950/allocator.requirements).
+
+### Równość zasobów i kontrola kosztów
+
+Dwa obiekty `memory_resource` są równe w sensie alokatora wtedy, gdy pamięć przydzieloną przez jeden można poprawnie zwolnić przez drugi zgodnie z ich kontraktem. Nie wystarcza wspólna klasa implementacji ani identyczny rozmiar bufora. Dwie odrębne areny monotoniczne zwykle nie są wymienne, choć mają tę samą strategię. Zwrócenie bezwarunkowego `true` z `do_is_equal` może skłonić kontener do przekazania bloku niewłaściwemu zasobowi.
+
+Instrumentujący zasób powinien rozróżniać żądane bajty, udane przydziały, bieżące wykorzystanie i maksimum. Zwiększenie licznika przed wywołaniem upstream może zliczać również nieudane żądanie, co nie jest błędem samo w sobie, ale wymaga właściwej nazwy metryki. Osobną wielkością są koszty narzutu alokatora; rozmiar żądania kontenera nie musi równać się liczbie bajtów zarezerwowanych przez system.
+
+Przeciążając globalne `operator new`, łatwo pominąć wersje wyrównane, tablicowe, sized delete lub ścieżki wyjątków. Dodatkowo logowanie wewnątrz alokatora może samo alokować i uruchomić rekurencję. Do obserwacji wybranej struktury PMR daje zwykle węższy, łatwiejszy do sprawdzenia punkt instrumentacji niż globalna ingerencja w przydziały całego procesu.
+
+Pamiętaj również o parowaniu alokacji wyrównanych. Przekazanie pamięci uzyskanej z aligned operator new do niewłaściwego delete może naruszyć kontrakt. Własny zasób powinien traktować argument alignment jako wymaganie, nie opcjonalną sugestię; prawidłowy rozmiar bloku nie rekompensuje źle wyrównanego początku.
 
 ## Powiązane tematy
 

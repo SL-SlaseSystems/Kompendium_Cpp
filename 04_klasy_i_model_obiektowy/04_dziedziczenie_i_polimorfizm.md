@@ -35,43 +35,65 @@ Liskov Substitution Principle wymaga czegoś więcej niż poprawnej składni: ty
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Dziedziczenie i polimorfizm”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Obiekt pochodny zawiera podobiekt bazowy. Konwersja `Rectangle*` do dostępnego, jednoznacznego `Shape*` daje dostęp do tej części interfejsu. Adres wskaźnika może wymagać dostosowania, szczególnie przy wielokrotnym dziedziczeniu. Nie należy zastępować takiej konwersji reinterpretacją bajtów tylko dlatego, że w prostym eksperymencie liczby adresów były identyczne.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W początkowym programie fabryka konstruuje `Rectangle`. `unique_ptr<Shape>` przejmuje odpowiedzialność i używa wskaźnika do bazy. Przy wywołaniu `area` typ statyczny określa dostępny interfejs, a typ dynamiczny prowadzi do implementacji `Rectangle::area`. Podczas usuwania wirtualny destruktor zapewnia rozpoczęcie sprzątania od typu najbardziej pochodnego.
+
+Przekazanie obiektu pochodnego przez wartość parametru bazowego tworzy jednak osobny obiekt bazy. Nie jest to drugi widok na cały oryginał. Część pochodna nie trafia do parametru, a jego typ dynamiczny jest bazą. Taki slicing nie występuje przy zwykłym przekazaniu referencji do bazy, która nadal odnosi się do podobiektu w oryginalnym obiekcie.
 
 ## Pogłębienie mechanizmu
 
-- Publiczne dziedziczenie modeluje relację podstawienia, a nie tylko ponowne użycie kodu. Kompozycja jest bezpieczniejsza, gdy typ pochodny nie potrafi zachować kontraktu klasy bazowej.
+Publiczne dziedziczenie udostępnia konwersję „pochodny do bazowego” odbiorcom interfejsu. Dziedziczenie prywatne i chronione zmienia dostępność tej konwersji i elementów odziedziczonych; nie usuwa fizycznej relacji podobiektów. Nie należy mylić poziomu dostępu do metody z wirtualnością: prywatną funkcję wirtualną nadal można nadpisać, choć nie można jej dowolnie wywołać z zewnątrz.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Dziedziczenie i polimorfizm” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Przy zwykłym diamencie dwie ścieżki dziedziczenia tworzą dwa podobiekty wspólnej bazy. Konwersja do tej bazy może być niejednoznaczna. Dziedziczenie wirtualne pozwala współdzielić jeden podobiekt tej bazy, którego inicjalizację wykonuje klasa najbardziej pochodna. Rozwiązuje to konkretny problem współdzielonej tożsamości, ale komplikuje konstrukcję i zwykle reprezentację. Nie jest synonimem wirtualnych metod.
+
+Klasa abstrakcyjna nie może być tworzona jako kompletny obiekt, ale jej podobiekt może istnieć wewnątrz typu pochodnego. Funkcja czysto wirtualna może mieć definicję, a czysto wirtualny destruktor musi ją mieć, ponieważ bierze udział w sprzątaniu baz. Oznaczenie `= 0` opisuje abstrakcyjny kontrakt, nie zawsze brak jakiegokolwiek ciała.
+
+Podstawialność obejmuje zachowanie, a nie tylko typy. Jeżeli baza obiecuje zapis dowolnego poprawnego dokumentu, pochodna odrzucająca część tych dokumentów bez przewidzianego sposobu błędu łamie kontrakt. Jeśli baza zapewnia, że operacja nie rzuca, override nie może poluzować specyfikatora wyjątków. Inne wymagania semantyczne, takie jak zachowanie stanu po niepowodzeniu, trzeba uzgodnić w dokumentacji i testach.
+
+Wirtualne wywołanie nie wymaga dynamicznej alokacji. Lokalny obiekt pochodny przekazany przez referencję również zachowuje polimorfizm. Alokacja jest zwykle potrzebna wtedy, gdy różne typy muszą być przechowywane pod wspólnym właścicielem o niezależnym czasie życia. To osobna decyzja od wyboru dispatchu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Dwie funkcje przyjmują tę samą rodzinę typów w różny sposób. Wersja przez wartość tworzy bazę, a wersja referencyjna zachowuje dynamiczny typ źródła.
 
-~~~text
-Temat: Dziedziczenie i polimorfizm
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <string_view>
+
+struct Device {
+    virtual ~Device() = default;
+    virtual std::string_view name() const { return "device"; }
+};
+struct Sensor : Device {
+    std::string_view name() const override { return "sensor"; }
+};
+
+std::string_view by_value(Device device) { return device.name(); }
+std::string_view by_reference(const Device& device) { return device.name(); }
+
+int main() {
+    Sensor sensor;
+    assert(by_value(sensor) == "device");
+    assert(by_reference(sensor) == "sensor");
+    const Device& base = sensor;
+    assert(base.name() == "sensor");
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Program nie alokuje obiektu przez `new`. Różnica wynika wyłącznie z konstrukcji parametru i rodzaju dostępu. W realnym interfejsie często warto zapobiegać przypadkowemu kopiowaniu bazy polimorficznej, na przykład ograniczając dostęp do jej operacji kopiowania.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Dziedziczenie i polimorfizm”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Własność polimorficznego obiektu i możliwość jego skopiowania trzeba zaprojektować oddzielnie. Wirtualna funkcja `clone` może zwracać nowy `unique_ptr<Base>` zachowujący właściwy typ dynamiczny. Samo kopiowanie wskaźnika daje jedynie kolejnego obserwatora, a kopiowanie `shared_ptr` kolejnego współwłaściciela tego samego obiektu. Żadna z tych operacji nie jest automatycznie głęboką kopią pochodnej wartości.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Używaj kompozycji, kiedy obiekt korzysta z innego obiektu jako części implementacji. Wybierz publiczną hierarchię, gdy odbiorcy mają operować przez stabilny wspólny kontrakt, a nowe typy mogą dochodzić niezależnie. Dla zamkniętego zestawu wariantów `variant` umożliwia jawne, wyczerpujące rozpatrywanie typów. Szablony nadają się, gdy wybór typu jest znany podczas kompilacji i nie potrzebujesz wspólnego runtime'owego magazynu.
 
-## Dobre praktyki
+**Ćwiczenie.** Czy `std::vector<Base>` przechowa pełne obiekty `Derived`, jeżeli wywołasz `push_back` z obiektem pochodnym?
 
-Dodawaj `override` do każdej implementacji funkcji wirtualnej; kompilator wykryje różnicę sygnatur. `final` zamyka klasę lub konkretny override. Nie wywołuj funkcji wirtualnych w konstruktorach z oczekiwaniem dispatchu do klasy pochodnej.
+**Odpowiedź.** Nie. Elementami tego kontenera są obiekty `Base`, więc nastąpi konstrukcja wartości bazowej i slicing. Dla otwartej hierarchii można użyć wektora właścicieli `unique_ptr<Base>`, a dla znanego zestawu typów wektora odpowiedniego `variant`.
+
+Źródła: [klasy pochodne](https://timsong-cpp.github.io/cppwp/n4950/class.derived), [klasy abstrakcyjne](https://timsong-cpp.github.io/cppwp/n4950/class.abstract), [funkcje wirtualne](https://timsong-cpp.github.io/cppwp/n4950/class.virtual).
 
 ## Powiązane tematy
 

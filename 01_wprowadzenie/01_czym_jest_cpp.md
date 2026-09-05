@@ -25,43 +25,49 @@ C++ jest używany w systemach operacyjnych, silnikach gier, przeglądarkach, baz
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Czym jest C++”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz przejście od tekstu źródłowego przez analizę składniową i semantyczną do artefaktu wykonywalnego. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie standardu od rozszerzenia kompilatora, ustawienia toolchainu i zachowania platformy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź pełne polecenie kompilacji, wersje narzędzi, diagnostykę oraz wynik uruchomienia w kontrolowanym środowisku. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Prześledź pierwszy program na trzech poziomach. Podczas kompilacji nazwa `std::vector<std::string>` określa konkretny typ kontenera; kompilator sprawdza, czy napis można skonstruować z każdego literału. Podczas wykonania powstaje obiekt `languages` i jego trzy elementy. Kontener organizuje przechowywanie elementów, a każdy napis sam obsługuje własną reprezentację. Nie trzeba znać rozmiaru wewnętrznego bufora napisu, aby legalnie go używać.
 
-Model dla tej części kompendium jest następujący: Program C++ powstaje w łańcuchu źródło–kompilator–linker–środowisko wykonawcze. Standard opisuje zachowanie programu abstrakcyjnego, implementacja wybiera reprezentację i ABI, a system operacyjny dostarcza proces, pliki oraz biblioteki. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W pętli `const auto& name` jest kolejną referencją do elementu. Zastąpienie jej przez `auto name` oznacza utworzenie kopii przy każdej iteracji. Wynik na ekranie pozostanie taki sam, lecz program może wykonywać więcej pracy. Po wyjściu z zakresu niszczony jest kontener i jego elementy. Zasada RAII działa także przy zwykłym wcześniejszym `return` i odwijaniu stosu po wyjątku; nie gwarantuje sprzątania po przerwaniu procesu przez system.
 
 ## Pogłębienie mechanizmu
 
-- C++ jest językiem wieloparadygmatowym z bezpośrednim modelem obiektów i deterministyczną destrukcją. Model zero-overhead nie obiecuje zerowego kosztu każdej konstrukcji; wymaga, aby nie płacić za mechanizm, którego program nie używa.
+Najważniejszym nawykiem jest oddzielenie **reguły języka**, **kontraktu biblioteki** i **wyboru implementacji**. Język mówi, kiedy wywołać destruktor. Biblioteka określa, że `vector` przechowuje zwykłe elementy ciągle w pamięci. Konkretna implementacja wybiera współczynnik wzrostu pojemności. Pierwsze dwa poziomy mogą być podstawą przenośnego programu; trzeciego nie należy zakodować jako założenia aplikacji.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Czym jest C++” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+System typów C++ jest statyczny, ale nie oznacza to, że wszystkie wartości są znane podczas kompilacji. Typ `int` może być znany, a jego wartość pochodzić z pliku. Szablon pozwala wybrać implementację na podstawie typu; funkcja wirtualna pozwala wybrać ją na podstawie rzeczywistego obiektu podczas wykonania. Oba mechanizmy mają inne zastosowania i mogą występować w tym samym programie.
+
+Semantyka wartości to kolejny fundament: przypisanie `b = a` dla wektora kopiuje jego elementy, podczas gdy przypisanie wskaźnika kopiuje adres. „Dwie zmienne” nie musi oznaczać „dwóch niezależnych danych”. Zanim przeanalizujesz trudny kod, ustal typ każdej zmiennej oraz to, czy reprezentuje wartość, właściciela czy obserwatora. To wyjaśnia więcej niż sam wygląd operatora `=`.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <vector>
 
-~~~text
-Temat: Czym jest C++
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    std::vector<int> original{1, 2, 3};
+    auto copy = original;
+    auto& alias = original;
+    copy[0] = 100;
+    alias[1] = 20;
+    assert(original[0] == 1);
+    assert(original[1] == 20);
+    assert(copy[1] == 2);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`copy` ma własny zestaw elementów. `alias` nie jest drugim wektorem: daje dostęp do `original`. Zmiana pierwszego elementu kopii nie zmienia oryginału, ale zmiana przez referencję jest zmianą oryginału. Obie kolekcje zostaną posprzątane automatycznie. Sama referencja nie ma operacji zwalniającej cudzą pamięć.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Czym jest C++”, oceniaj przenośność, powtarzalność budowania, jakość diagnostyki i jawne wymagania wersji standardu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Ucz się C++ od poprawnego modelu obiektów, a następnie dodawaj kontrolę nad kosztami. Do kolekcji o zmiennym rozmiarze zacznij od `vector`, do tekstu od `string`, a do wyłącznej własności dynamicznego obiektu od `unique_ptr`. Surowa pamięć, niestandardowy allocator i ręczna synchronizacja przydadzą się później, gdy potrafisz określić brakującą gwarancję albo zmierzyć ograniczenie prostszej wersji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Nie utożsamiaj zaawansowania z liczbą użytych mechanizmów. Dobrze zaprojektowana biblioteka ukrywa trudne reguły wewnątrz niewielu typów i udostępnia łatwy do użycia kontrakt. Warto umieć wyjaśnić zarówno implementację właściciela zasobu, jak i powód, dla którego kod aplikacji powinien korzystać z gotowego właściciela.
 
-## Dobre praktyki
+## Ćwiczenie z odpowiedzią
 
-Ucz się najpierw nowoczesnego C++23, a składnię historyczną traktuj jako wiedzę potrzebną przy utrzymaniu istniejącego kodu. Preferuj bibliotekę standardową i RAII. Surowy wskaźnik powinien zwykle oznaczać niewłaścicielski dostęp, nie obowiązek wykonania `delete`.
+Zmień `auto& alias` na `auto alias`. Które sprawdzenie przestanie być prawdziwe? Sprawdzenie `original[1] == 20`, ponieważ teraz `alias` również jest niezależną kopią. Następnie użyj `const auto& alias`: odczyty pozostaną legalne, ale przypisanie do `alias[1]` zostanie odrzucone podczas kompilacji. To trzy różne kontrakty zapisane przez niewielką zmianę deklaracji.
+
+Źródło idei kosztu abstrakcji: [Bjarne Stroustrup, Abstraction and the C++ machine model](https://www.stroustrup.com/abstraction-and-machine.pdf).
 
 ## Powiązane tematy
 

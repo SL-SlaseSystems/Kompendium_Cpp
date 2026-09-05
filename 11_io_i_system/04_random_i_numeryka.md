@@ -23,7 +23,7 @@ int main() {
 }
 ~~~
 
-Stały seed daje reprodukowalny test. W aplikacji można seedować z `random_device` lub kontrolowanego źródła, ale zapisuj seed symulacji, aby odtworzyć błąd. Nie generuj zakresu przez `engine() % n`, bo modulo może wprowadzać bias; użyj odpowiedniego distribution.
+Stały seed pomaga odtworzyć test przy zachowaniu silnika, implementacji rozkładu i kolejności wywołań. W aplikacji można seedować z `random_device` lub kontrolowanego źródła, ale zapisuj seed symulacji, aby odtworzyć błąd. Nie generuj zakresu przez `engine() % n`, bo modulo może wprowadzać bias; użyj odpowiedniego distribution.
 
 Nagłówek `<numeric>` oferuje `accumulate`, `inner_product`, `iota` oraz algorytmy skanowania. C++17 dodał warianty umożliwiające przestawianie działań, dlatego wyniki floating point mogą różnić się kolejnością zaokrągleń. `std::reduce` ma inne wymagania niż sekwencyjne `accumulate`.
 
@@ -31,39 +31,56 @@ Overflow signed integer pozostaje UB także w obliczeniach numerycznych. Sprawdz
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „random i numeryka”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz normalizację wejścia, wykonanie operacji systemowej lub bibliotecznej, sprawdzenie wyniku i zamknięcie zasobu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel format danych od obiektu domenowego, czas monotoniczny od kalendarzowego oraz API standardowe od zależności platformowej. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź kod błędu, liczbę przetworzonych bajtów, stan strumienia, jednostkę pomiaru i wynik dla przerwanej operacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Silnik przechowuje stan. Każde jego wywołanie produkuje liczbę i przesuwa stan do następnego kroku. Rozkład pobiera tyle wyników silnika, ile potrzebuje do skonstruowania wartości z wybranej przestrzeni. Jeden rzut kostką nie musi odpowiadać dokładnie jednemu wywołaniu silnika. Dlatego dopisanie losowania w innym miejscu może zmienić wszystkie późniejsze wyniki symulacji.
 
-Model dla tej części kompendium jest następujący: I/O przekracza granicę procesu i dlatego jest częściowe, opóźnione oraz zależne od reprezentacji. Każda operacja potrzebuje modelu błędów, limitu danych, kodowania lub jednostki oraz zasad własności uchwytu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Rozpocznij test od stałego seeda, zapisz dane wejściowe i oczekiwane własności. Sprawdź zakres i inwarianty, a nie tylko pojedynczą „losową” wartość. Dla debugowania długiej symulacji potrzebujesz także wersji algorytmu i informacji o strumieniach losowych. Sam seed nie odtworzy programu, w którym zmieniła się kolejność wywołań generatora.
 
 ## Pogłębienie mechanizmu
 
-- Generator pseudolosowy tworzy deterministyczny ciąg ze stanu, a distribution mapuje go na wymagany rozkład bez ręcznego modulo bias. Seed odpowiada za odtwarzalność eksperymentu, nie za kryptograficzne bezpieczeństwo.
+Standaryzowany silnik, taki jak `mt19937`, ma zdefiniowaną transformację stanu. Algorytm mapowania wielu rozkładów nie jest identycznie określony dla wszystkich implementacji biblioteki. Ten sam seed i silnik nie gwarantują więc identycznej sekwencji wyników `uniform_int_distribution` między różnymi bibliotekami. Dla bitowej reprodukowalności określ również metodę mapowania, wersję i format stanu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „random i numeryka” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Bias modulo wynika z nierównej liczby reprezentantów reszt. Jeżeli źródło daje równomiernie liczby od 0 do 7, reszty modulo 3 to `0,1,2,0,1,2,0,1`: zero i jeden występują po trzy razy, a dwa tylko dwa razy. Poprawny rozkład może odrzucać część wyników, aby wyrównać prawdopodobieństwa. Dodanie bardziej złożonego wyrażenia modulo nie usuwa tego problemu.
+
+Zmiennoprzecinkowe dodawanie nie jest łączne ze względu na zaokrąglenia. Zmiana kolejności sumowania może zmienić wynik bez błędu kompilatora. `accumulate` definiuje sekwencyjne narastanie akumulatora; `reduce` dopuszcza przegrupowania także bez równoległej polityki. Typ wartości początkowej wpływa na typ akumulatora: `0` i `0.0` nie są zamiennymi argumentami dla sumy wartości ułamkowych.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <array>
+#include <cassert>
+#include <numeric>
+#include <random>
 
-~~~text
-Temat: random i numeryka
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    const std::array values{0.5, 0.5, 0.5};
+    const int truncated = std::accumulate(values.begin(), values.end(), 0);
+    const double exact_here = std::accumulate(values.begin(), values.end(), 0.0);
+    assert(truncated == 0);
+    assert(exact_here == 1.5);
+
+    std::mt19937 a{123u};
+    auto b = a;
+    for (int i = 0; i < 10; ++i) {
+        const auto x = a();
+        const auto y = b();
+        assert(x == y);
+    }
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Akumulator typu `int` przy każdej iteracji traci część ułamkową; to nie jednorazowe zaokrąglenie ostatecznego wyniku. Wartości połówkowe wybrano celowo, aby przykład nie zależał od subtelności dziesiętnych ułamków binarnych. Kopia silnika zawiera kopię stanu, więc dalsze identyczne wywołania dają identyczne wyniki. Nie jest to utworzenie niezależnego strumienia losowego.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „random i numeryka”, oceniaj jawne kodowanie, kontrolowane limity, odporność na częściowy odczyt, bezpieczne ścieżki i deterministyczne sprzątanie. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Do zwykłych symulacji wybierz silnik i rozkład dostosowane do modelu, z jawną polityką seedowania. Do tokenów uwierzytelniających używaj kryptograficznego generatora zapewnianego przez sprawdzoną bibliotekę lub system. Duży okres `mt19937` nie oznacza odporności na przewidywanie. `random_device` ma kontrakt zależny od implementacji i może też zgłosić błąd.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+W wielowątkowości unikaj równoczesnych niesynchronizowanych wywołań tego samego silnika. Osobne silniki rozwiązują data race, ale sposób doboru ich strumieni pozostaje problemem statystycznym. W obliczeniach numerycznych określ tolerancję błędu, obsługę NaN i nieskończoności oraz wymagany zakres; zwykłe „wyniki są prawie równe” nie jest pełnym kontraktem.
+
+## Ćwiczenie z odpowiedzią
+
+Czy skopiowanie generatora na początku każdego zadania daje niezależne losowania? Nie, zadania startują z tego samego stanu i mogą otrzymywać identyczne sekwencje. Czy zastąpienie zera przez `0.0` naprawia każdy błąd sumy? Nie: usuwa konkretną utratę ułamków przez typ akumulatora, lecz nie znosi zaokrągleń ani problemów kondycjonowania obliczeń.
+
+Źródło kontraktów silników i rozkładów: [C++23, random number generation requirements](https://timsong-cpp.github.io/cppwp/n4950/rand.req).
 
 ## Powiązane tematy
 

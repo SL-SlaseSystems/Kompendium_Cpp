@@ -36,39 +36,63 @@ Zwracanie referencji lub wskaźnika wymaga, aby wskazywany obiekt żył wystarcz
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Funkcje i przeciążanie”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Przy wywołaniu funkcji kompilator najpierw wyszukuje nazwę i zbiera kandydatów. Obejmuje to zwykłe wyszukiwanie oraz, dla odpowiednich wywołań, ADL korzystające z typów argumentów. Następnie sprawdza liczbę parametrów, dostępne argumenty domyślne, możliwość konwersji i ograniczenia szablonów. Dopiero wśród funkcji wykonalnych porównuje dopasowanie. Dostępność `private` nie służy jako wygodny filtr pozwalający wybrać gorszy publiczny overload: kontrola dostępu następuje po wyborze.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Dokładne dopasowanie zwykle wygrywa z promocją, a promocja ze zwykłą konwersją. Dla argumentu `short` przeciążenie przyjmujące `int` może więc wygrać z wersją `double`. To porównanie sekwencji konwersji, nie arbitralne mierzenie, ile bajtów różni typy. Przy kilku argumentach może nie być jednej funkcji lepszej od wszystkich pozostałych, co daje niejednoznaczność.
+
+Po wyborze funkcji obliczane są argumenty i inicjalizowane parametry. Parametr przez wartość jest osobnym obiektem, ale sposób jego utworzenia zależy od źródła: może dojść do kopiowania, przeniesienia albo bezpośredniej konstrukcji. Referencja wiąże się z istniejącym obiektem. Nazwany parametr `T&&` użyty wewnątrz funkcji jest wyrażeniem lvalue; ruch dalej wymaga świadomego `std::move` albo, dla forwarding reference, `std::forward`.
 
 ## Pogłębienie mechanizmu
 
-- Overload resolution buduje kandydatów, odrzuca funkcje niewykonalne i porównuje sekwencje konwersji. Wartość domyślna argumentu jest wybierana w miejscu wywołania, natomiast funkcja wybrana po typach nadal ma jedną definicję.
+Parametry `int` oraz `const int` przekazywane przez wartość nie tworzą dwóch różnych przeciążeń. Najwyższa kwalifikacja nie należy tu do typu funkcji, choć w definicji ogranicza modyfikowanie lokalnego parametru. Inaczej jest z `int&` i `const int&`: kwalifikacja dotyczy obiektu, do którego uzyskuje się dostęp, i wpływa na możliwość wiązania argumentu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Funkcje i przeciążanie” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Deklaracja parametru `int values[10]` jest dostosowywana do `int*`. Nie wymusza dziesięciu elementów. Dla wymagania stałego rozmiaru użyj referencji do tablicy lub `std::span<int, 10>`, a dla rozmiaru dynamicznego `std::span<int>`. Składnia przypominająca tablicę nie stanowi kontroli jej granic.
+
+Domyślne argumenty nie są częścią typu funkcji i są dobierane z deklaracji widocznych przy wywołaniu. `noexcept` natomiast od C++17 jest elementem typu funkcji. Obietnica `noexcept` nie zatrzymuje kompilacji każdego potencjalnie rzucającego wywołania; jeśli wyjątek faktycznie opuści funkcję, nastąpi `std::terminate`. Stosuj tę obietnicę na podstawie zachowania wszystkich operacji, które mogą się wykonać.
+
+Referencja zwracana przez funkcję nie przedłuża automatycznie życia wskazywanego obiektu. Szczególnie niebezpieczna jest funkcja przyjmująca `const T&` i zwracająca ten sam alias: argument tymczasowy może zniknąć na końcu instrukcji wywołującej. Zwrócenie wartości lepiej wyraża niezależny wynik, a gwarantowana konstrukcja z prvalue i opcjonalne NRVO często eliminują koszt dodatkowego obiektu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Przeciążenia referencyjne pozwalają obserwować różnicę między obiektem modyfikowalnym, stałym i tymczasowym. Jednoargumentowe wywołanie funkcji z wartością domyślną nadal wywołuje tę samą funkcję dwuparametrową.
 
-~~~text
-Temat: Funkcje i przeciążanie
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <string_view>
+#include <utility>
+
+std::string_view category(int&) { return "mutable lvalue"; }
+std::string_view category(const int&) { return "const lvalue"; }
+std::string_view category(int&&) { return "rvalue"; }
+
+int scale(int value, int factor = 2) { return value * factor; }
+
+int main() {
+    int value = 5;
+    const int fixed = 6;
+    assert(category(value) == "mutable lvalue");
+    assert(category(fixed) == "const lvalue");
+    assert(category(7) == "rvalue");
+    assert(category(std::move(value)) == "rvalue");
+    assert(value == 5);
+    assert(scale(4) == 8);
+    assert(scale(4, 3) == 12);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`std::move(value)` nie zmienia tu liczby. Umożliwia wybór wersji `int&&`, a ta tylko zwraca opis. Rzeczywisty efekt zależy od ciała wybranej funkcji, nie od samej kategorii argumentu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Funkcje i przeciążanie”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Parametr przez wartość jest naturalny dla małych liczb i dla funkcji, która potrzebuje własnej kopii. `const T&` sprawdza się przy odczycie większego obiektu, `T&` przy wymaganej modyfikacji, a wskaźnik lub typ opcjonalny przy dopuszczalnym braku argumentu. Widok na tekst opisuje odczyt znaków lepiej niż wymuszanie konkretnego kontenera.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Unikaj rodzin przeciążeń, które różnią się drobnymi konwersjami liczbowymi o innym znaczeniu. Osobne nazwy operacji lub mocne typy jednostek mogą wyeliminować przypadkowy wybór. Wartość domyślna powinna oznaczać stabilną, zrozumiałą politykę, ponieważ jest powielana w skompilowanych miejscach wywołania.
+
+**Ćwiczenie.** Czy można przeciążyć `int parse(std::string_view)` przez dodanie `double parse(std::string_view)`?
+
+**Odpowiedź.** Nie. Wywołanie nie jest rozstrzygane wyłącznie przez oczekiwany typ wyniku. Potrzebne są różne parametry, różne nazwy lub jawny argument szablonu opisujący żądany typ.
+
+Źródła: [wybór najlepszej funkcji](https://timsong-cpp.github.io/cppwp/n4950/over.match.best), [deklaratory funkcji](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct), [argumenty domyślne](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct.default).
 
 ## Powiązane tematy
 

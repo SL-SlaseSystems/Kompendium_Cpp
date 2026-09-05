@@ -35,39 +35,63 @@ Domyślny argument funkcji wirtualnej jest wybierany statycznie na podstawie typ
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „virtual, override i RTTI”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie `event.kind()` najpierw podlega zwykłym regułom wyszukiwania i sprawdzania dostępności. Kompilator widzi interfejs typu statycznego `Event&`, znajduje funkcję wirtualną, a wykonanie wybiera jej final overrider dla faktycznego obiektu. Nie ma obowiązku istnienia tablicy o określonym układzie. Optymalizator może nawet ustalić typ i usunąć pośrednie wywołanie, zachowując tę samą semantykę.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`override` każe sprawdzić, czy deklaracja rzeczywiście nadpisuje odziedziczoną funkcję. Różnica w końcowym `const`, kwalifikatorze referencyjnym lub typach parametrów może zamiast tego stworzyć inną funkcję. Bez `override` literówka potrafi przejść kompilację i zostawić aktywną implementację bazy. `final` na funkcji zabrania dalszego nadpisywania, a na klasie zabrania dalszego dziedziczenia.
+
+Przy `dynamic_cast<Click*>(&event)` sprawdzany jest rzeczywisty układ publicznych, jednoznacznych relacji w obiekcie. Sukces daje poprawnie dostosowany wskaźnik do żądanej części. Niepowodzenie sprawdzanego rzutowania wskaźnikowego daje `nullptr`, dlatego dostęp musi być uzależniony od wyniku. Rzutowanie referencyjne wyraża silniejsze oczekiwanie i sygnalizuje brak dopasowania wyjątkiem `std::bad_cast`.
 
 ## Pogłębienie mechanizmu
 
-- Wirtualne wywołanie działa przez dynamiczny typ obiektu, ale podczas konstruktora i destruktora dispatch nie przechodzi do bardziej pochodnej części. Polimorficzna baza przeznaczona do usuwania przez wskaźnik bazowy potrzebuje wirtualnego destruktora.
+Sprawdzany downcast i crosscast wymagają polimorficznego typu źródłowego, czyli klasy z co najmniej jedną funkcją wirtualną. Prosty upcast może być poprawny bez RTTI. Crosscast pozwala przejść między dwiema bazami tego samego najbardziej pochodnego obiektu, jeżeli spełnione są reguły dostępu i jednoznaczności. `static_cast` w dół hierarchii nie wykonuje tej kontroli; wymaga, aby obiekt rzeczywiście spełniał założenie.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „virtual, override i RTTI” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`typeid` dla glvalue typu polimorficznego informuje o typie dynamicznym. Dla niepolimorficznego obiektu daje typ statyczny. Gdy argument jest polimorficznym dereferencjonowaniem pustego wskaźnika, `typeid(*p)` ma szczególną regułę zgłoszenia `std::bad_typeid`. Nie należy z tego wyprowadzać ogólnego pozwolenia na dereferencję `nullptr` w innych wyrażeniach.
+
+Wynik `type_info::name()` jest zależny od implementacji i nie jest stabilnym identyfikatorem do pliku, protokołu ani bazy danych. Nazwa może być zakodowana zgodnie z ABI i zmienić się po przebudowaniu. Porównanie `typeid(a) == typeid(b)` bada równość informacji o typach, ale nie zastępuje relacji „ten typ da się użyć jako wskazany interfejs”. Do tej relacji pasuje odpowiedni `dynamic_cast`.
+
+Nadpisywana funkcja może mieć kowariantny wynik będący wskaźnikiem lub referencją do odpowiednio powiązanej klasy. Ta reguła nie obejmuje automatycznie `unique_ptr<Derived>` jako zamiennika `unique_ptr<Base>`. Szablony smart pointerów są różnymi klasami, więc typ wyniku wirtualnej fabryki zwykle musi pozostać dokładnie wspólnym typem właściciela.
+
+Wywołanie kwalifikowane, na przykład `object.Base::operation()`, celowo pomija dispatch wirtualny i wskazuje implementację bazy. Zwykłe wywołanie w konstruktorze bazy również nie dociera do części pochodnej, lecz z innego powodu: obowiązuje etap konstrukcji. Nie używaj wirtualnej metody jako sposobu wymuszenia zachowania gotowej klasy pochodnej przed zakończeniem jej tworzenia.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Argument domyślny jest wybierany w miejscu wywołania, natomiast ciało funkcji może zależeć od typu dynamicznego. Program pokazuje oba wybory osobno oraz sprawdzony dostęp do dodatkowego typu.
 
-~~~text
-Temat: virtual, override i RTTI
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <typeinfo>
+
+struct Base {
+    virtual ~Base() = default;
+    virtual int calculate(int value = 1) const { return value; }
+};
+struct Derived final : Base {
+    int calculate(int value = 7) const override { return value * 10; }
+};
+struct Other final : Base {};
+
+int main() {
+    Derived object;
+    Base& base = object;
+    assert(base.calculate() == 10);
+    assert(object.calculate() == 70);
+    assert(typeid(base) == typeid(Derived));
+    assert(dynamic_cast<Derived*>(&base) == &object);
+    assert(dynamic_cast<Other*>(&base) == nullptr);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+W obu pierwszych wywołaniach działa ciało `Derived::calculate`. Różnią się argumenty dołączone z deklaracji widocznej przez typ statyczny. To poprawne zachowanie języka, lecz zwykle niepotrzebnie zaskakujące API. Publiczna niewirtualna metoda z jedną polityką argumentów może delegować do prywatnej metody wirtualnej.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „virtual, override i RTTI”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj `override` przy każdym świadomym nadpisaniu. `final` stosuj, gdy zamknięcie rozszerzania jest częścią projektu, nie jako obietnicę konkretnego przyspieszenia. RTTI jest użyteczne przy opcjonalnych możliwościach obiektu i integracji z istniejącą hierarchią. Jeśli każda operacja zaczyna się od długiej listy downcastów, rozważ wspólną funkcję wirtualną, visitor albo zamknięty wariant.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Baza deklaruje `virtual int value() const;`, a pochodna `int value();`. Czy druga funkcja nadpisuje pierwszą?
+
+**Odpowiedź.** Nie, ponieważ różni się kwalifikacją obiektu. Dodanie `override` ujawni błąd. Jeśli intencją było nadpisanie, należy dopisać `const` w pochodnej; jeśli nowa operacja, trzeba świadomie rozważyć również przesłonięcie nazw z bazy.
+
+Źródła: [reguły override](https://timsong-cpp.github.io/cppwp/n4950/class.virtual), [dynamic_cast](https://timsong-cpp.github.io/cppwp/n4950/expr.dynamic.cast), [typeid](https://timsong-cpp.github.io/cppwp/n4950/expr.typeid).
 
 ## Powiązane tematy
 

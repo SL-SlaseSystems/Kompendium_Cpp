@@ -6,6 +6,7 @@ Adres pamięci nie wystarcza do legalnego dostępu. Musi istnieć żywy obiekt w
 
 ~~~cpp
 #include <cassert>
+#include <cstddef>
 #include <memory>
 #include <new>
 
@@ -31,39 +32,59 @@ Konwersja pointer–integer–pointer ma implementacyjne i standardowe ogranicze
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Lifetime, aliasing i pointer provenance”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym przykładzie tablica zapewnia rozmiar i wyrównanie dla `Value`. Rzutowanie uzyskuje wskaźnik odpowiedniego typu, lecz operacją tworzącą obiekt jest `construct_at`. Jego wynik odnosi się do nowo utworzonego obiektu; dlatego właśnie ten wynik zapisujemy i dereferencjonujemy. `destroy_at` kończy lifetime `Value`, natomiast sama tablica nadal istnieje do końca zakresu. Nie wywołujemy `delete`, ponieważ pamięć nie pochodzi z odpowiadającego mu wyrażenia `new`.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Oddziel trzy pytania: czy bajty są dostępne, czy istnieje w nich obiekt i czy dane wyrażenie może odczytywać jego wartość. Alokator może udostępnić pamięć dla stu elementów, choć kontener skonstruował tylko trzy. Dostęp do czwartego elementu nie staje się legalny przez samo odpowiednie `capacity()`. Z kolei odczyt reprezentacji żywego obiektu przez `unsigned char` nie jest zwykłym dostępem do wartości przez dowolny obcy typ.
 
 ## Pogłębienie mechanizmu
 
-- Reguły aliasingu określają, przez jakie glvalue wolno uzyskać dostęp do obiektu, a provenance wiąże wskaźnik z pochodzeniem storage. Kopiowanie adresu do liczby i z powrotem nie zawsze zachowuje wszystkie gwarancje dostępu.
+C++23 dopuszcza niejawne tworzenie obiektów typów implicit-lifetime w pewnych operacjach, na przykład przy określonych alokacjach lub kopiowaniu pamięci. Nie oznacza to, że każdy zapis przez dowolny wskaźnik rozpoczyna lifetime każdego typu. `std::string` potrzebuje właściwej konstrukcji. Nawet utworzenie obiektu klasy implicit-lifetime nie musi rozpocząć życia podobiektów, które same nie należą do tej kategorii. W kodzie kontenera jawne `construct_at` często daje prostszy, łatwiejszy do sprawdzenia model.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Lifetime, aliasing i pointer provenance” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Reguły type accessibility pozwalają oglądać reprezentację przez `char`, `unsigned char` oraz `std::byte`. Nie należy automatycznie dopisywać do tej listy `signed char`. Zgodność rozmiarów `int` i `float` także nie pozwala odczytać jednego przez referencję do drugiego. `memcpy` albo `bit_cast` przekazuje reprezentację bez tworzenia niedozwolonego aliasu, ale nadal trzeba wykazać poprawność reprezentacji docelowej.
+
+Transparent replacement powoduje, że stare nazwy, referencje i wskaźniki mogą zacząć oznaczać nowy obiekt po zastąpieniu starego. W C++23 wymagania obejmują ten sam typ z pominięciem najwyższego cv, dokładne nałożenie storage oraz ograniczenia dotyczące obiektów const i potencjalnie nakładających się podobiektów. Baza klasy i pole `[[no_unique_address]]` wymagają szczególnej ostrożności. Nie stosuj uproszczonej reguły „ten sam adres, więc ten sam obiekt”.
+
+`std::launder` wymaga istniejącego obiektu odpowiedniego typu pod danym adresem i spełnienia ograniczeń osiągalności bajtów. Nie tworzy obiektu, nie usuwa const, nie wyrównuje adresu i nie legalizuje use-after-free. Wskaźnik zwrócony bezpośrednio przez placement new zwykle oszczędza konieczności rozważania prania starego wskaźnika. Konwersja przez liczbę całkowitą także nie zastępuje tych reguł; `uintptr_t` jest opcjonalny, a ogólny model provenance nie sprowadza się do matematyki adresów.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <memory>
+#include <new>
+#include <string>
 
-~~~text
-Temat: Lifetime, aliasing i pointer provenance
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    alignas(std::string) std::byte bytes[sizeof(std::string)];
+    auto* text = std::construct_at(
+        reinterpret_cast<std::string*>(bytes), "pierwszy");
+    assert(*text == "pierwszy");
+    std::destroy_at(text);
+    text = std::construct_at(
+        reinterpret_cast<std::string*>(bytes), "drugi");
+    assert(*text == "drugi");
+    std::destroy_at(text);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwszy destruktor zwalnia zasoby napisu, ale pozostawia zewnętrzny storage. Druga konstrukcja tworzy odrębny obiekt w tych samych bajtach. W obu przypadkach korzystamy z aktualnego wyniku `construct_at`. To demonstracja mechanizmu, nie kompletny kontener: jeśli pomiędzy konstrukcją a destrukcją dodasz operację rzucającą wyjątek, potrzebny będzie strażnik RAII wywołujący destruktor przy rozwijaniu stosu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Lifetime, aliasing i pointer provenance”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj `variant` lub `optional`, gdy potrzebujesz zmiany aktywnego stanu o znanym zestawie typów. Implementacje tych klas rozwiązują już problemy wyrównania, wyjątków i liczby skonstruowanych obiektów. Surowe storage ma uzasadnienie przy pisaniu kontenera, areny, interfejsu sprzętowego lub wąskiej warstwy interoperacyjności. Dokumentuj wówczas dokładnie moment uzyskania i oddania własności; nie wymagaj od każdego klienta ponownego dowodzenia lifetime.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy po `destroy_at(text)` wolno sprawdzić `text->empty()` przed drugą konstrukcją? **Odpowiedź:** nie, żywy `std::string` już nie istnieje. Czy samo wyzerowanie tablicy bajtów skonstruuje pusty napis? Również nie; poprawny stan bibliotecznego typu powstaje przez jego konstruktor, a reprezentacja nie jest publicznym kontraktem. Czy trzeba użyć `launder` w drugim przykładzie? Nie: zapisujemy wskaźnik uzyskany z nowej konstrukcji.
+
+Reguły wersji bazowej opisują [N4950: lifetime](https://timsong-cpp.github.io/cppwp/n4950/basic.life), [type accessibility](https://timsong-cpp.github.io/cppwp/n4950/basic.lval) i [launder](https://timsong-cpp.github.io/cppwp/n4950/ptr.launder).
+
+### Arytmetyka wskaźników i granice obiektu
+
+Wskaźnik one-past-the-end można tworzyć i porównywać w odpowiednich operacjach, lecz nie wolno go dereferencjonować. Arytmetyka wskaźników odnosi się do elementów tej samej tablicy; sąsiedztwo dwóch niezależnych alokacji nie scala ich w jedną tablicę. Odejmowanie wskaźników do różnych takich obiektów nie jest przenośnym sposobem wyznaczania fizycznej odległości w pamięci. Układ sąsiednich elementów trzeba odróżniać od przypadkowego układu przydziałów alokatora.
+
+Przedłużenie życia tymczasowego obiektu przez referencję zależy od konkretnego sposobu wiązania. Przekazanie tej samej referencji dalej przez funkcję nie uruchamia przedłużenia ponownie. `const auto& ref = make_value()` może mieć inną sytuację niż referencja zwrócona z funkcji przyjmującej tymczasowy argument. Typ referencji w obu miejscach wygląda podobnie, ale to pełne wyrażenie i kontekst inicjalizacji wyznaczają rzeczywisty koniec życia.
+
+W projektowaniu niskopoziomowym rysuj osobno lifetime storage, obiektu i widoków. Kontener może nadal istnieć po realokacji, ale wszystkie stare wskaźniki do jego elementów mogą już wisieć. Z kolei przeniesienie właściciela pamięci nie zawsze przenosi same obiekty; ich adres może pozostać stabilny, choć zmienia się obiekt odpowiedzialny za późniejsze zniszczenie.
 
 ## Powiązane tematy
 

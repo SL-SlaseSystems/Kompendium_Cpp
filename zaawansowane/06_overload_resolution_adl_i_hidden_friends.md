@@ -36,40 +36,66 @@ Customization point pattern często wykonuje niekwalifikowane wywołanie po wpro
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Overload resolution, ADL i hidden friends”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W wyrażeniu `Meter{20} + Meter{22}` typy argumentów wyznaczają powiązane klasy i przestrzenie nazw. ADL odnajduje funkcję zaprzyjaźnioną z `Meter`, choć nie została wprowadzona osobną deklaracją dostępną przez zwykłe wyszukiwanie. Funkcja otrzymuje dwie wartości, dodaje ich prywatne pola i konstruuje wynik. Przyjaźń nadaje dostęp do pól; ADL odpowiada za odnalezienie funkcji. Są to dwa odrębne mechanizmy.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Po zbudowaniu zbioru kandydatów kompilator sprawdza liczbę argumentów, dedukcję szablonów, constraints oraz możliwość niejawnych konwersji. Wybór najlepszego przeciążenia porównuje sekwencje konwersji dla poszczególnych argumentów. Kandydat powinien nie być gorszy dla żadnego argumentu i wygrać zgodnie z dalszymi regułami rozstrzygania. Nie oblicza się sumy „kosztów konwersji”; funkcja lepsza dla pierwszego argumentu, lecz gorsza dla drugiego może prowadzić do niejednoznaczności.
 
 ## Pogłębienie mechanizmu
 
-- ADL dodaje do wyszukiwania funkcje z przestrzeni skojarzonych z typami argumentów. Hidden friend wykorzystuje tę regułę, udostępniając operację tylko wtedy, gdy uczestniczy odpowiedni typ.
-- Hidden friend jest zdefiniowany w klasie, lecz odnajdywany głównie przez ADL, co ogranicza zanieczyszczenie zwykłego lookup. Ranking kandydatów nadal zależy od konwersji i partial ordering.
+Lookup poprzedza overload resolution. Prywatna funkcja składowa może uczestniczyć w wyborze, a dopiero wybranie niedostępnego kandydata kończy się błędem dostępu. Podobnie funkcja `= delete` jest kandydatem, który może wygrać i celowo zabronić określonej konwersji. Kompilator nie usuwa takich funkcji, aby spróbować mniej dopasowanego publicznego przeciążenia. To pozwala projektować precyzyjne ograniczenia interfejsu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Overload resolution, ADL i hidden friends” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Standardowa sekwencja konwersji ma pierwszeństwo przed konwersją użytkownika, lecz „funkcja nieszablonowa wygrywa” działa dopiero przy spełnieniu odpowiednich warunków porównania. Szablon z dokładnym dopasowaniem może wygrać z funkcją nieszablonową wymagającą konwersji. List-initialization wprowadza preferencję dla konstruktorów `initializer_list`, dlatego `vector<int>{3, 7}` i `vector<int>(3, 7)` mają różną treść, mimo identycznych liczb.
+
+Niekwalifikowane wywołanie `swap(a, b)` po `using std::swap` łączy standardowy fallback z możliwością odnalezienia specjalizowanej funkcji przez ADL. Bez fallbacku typ podstawowy może nie zapewnić żadnej funkcji do odnalezienia. Przy `std::swap(a, b)` kwalifikacja wyłącza ten mechanizm dostosowania. Obiekty punktów dostosowania biblioteki ranges mają własne dokładne reguły i nie są po prostu dowolnym zestawem przeciążeń funkcji o identycznej nazwie.
+
+Hidden friend ogranicza przypadkowe konwersje: co najmniej jeden argument musi już wnosić właściwy powiązany typ do ADL. Dwa zupełnie obce argumenty nie spowodują odnalezienia operatora tylko dlatego, że oba mogłyby zostać przekonwertowane do `Meter`. Natomiast po odnalezieniu funkcji zwykłe reguły konwersji nadal obowiązują. `explicit` na konstruktorze zapobiega tu automatycznemu mieszaniu metrów z liczbami.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <utility>
 
-~~~text
-Temat: Overload resolution, ADL i hidden friends
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+namespace app {
+struct Pair {
+    int first, second;
+    friend void swap(Pair& a, Pair& b) noexcept {
+        using std::swap;
+        swap(a.first, b.first);
+        swap(a.second, b.second);
+    }
+};
+}
+template<class T>
+void exchange_values(T& a, T& b) noexcept(noexcept(swap(a, b))) {
+    swap(a, b);
+}
+int main() {
+    app::Pair a{1, 2}, b{3, 4};
+    exchange_values(a, b);
+    assert(a.first == 3 && b.second == 2);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+W tym celowo ograniczonym adapterze wywołanie zależne odnajduje wyłącznie swap dostarczony przez ADL; dlatego przykład instancjuje go dla `app::Pair`. Wewnątrz hidden friend używamy standardowego fallbacku dla pól `int`. Gdyby adapter miał obsługiwać także `int`, należałoby zapewnić fallback również dla jego wywołania i spójnie zbudować warunek `noexcept`, albo użyć `std::ranges::swap`. Wyrażenie w specyfikacji wyjątku także podlega regułom lookup.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Overload resolution, ADL i hidden friends”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Metoda składowa pasuje do operacji mającej wyraźny obiekt odbiorcy. Symetryczny operator arytmetyczny często czytelniej wyraża funkcja nieskładowa. Hidden friend daje dostęp do reprezentacji i kontroluje zakres wyszukiwania bez publicznych getterów. Nie dodawaj przeciążeń do `std`, poza szczególnymi dozwolonymi przez standard przypadkami specjalizacji; dostosowanie przez własną przestrzeń nazw jest właściwym punktem wyjścia.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dla `f(long)` i `template<class T> f(T)`, który kandydat przyjmie `int`? **Odpowiedź:** szablon, bo daje exact match zamiast konwersji do `long`. Czy `f(int)=delete` spowoduje wybór `f(long)` dla argumentu `int`? Nie; najlepsza funkcja pozostaje usunięta, więc wywołanie jest błędne. Tak odróżnisz brak kandydata od zakazanego najlepszego dopasowania.
+
+Źródła: [N4950: ADL](https://timsong-cpp.github.io/cppwp/n4950/basic.lookup.argdep) i [najlepsza funkcja](https://timsong-cpp.github.io/cppwp/n4950/over.match.best).
+
+### Ewolucja zbioru przeciążeń
+
+Dodanie przeciążenia może zmienić znaczenie istniejącego wywołania, choć wszystkie wcześniejsze funkcje pozostały dostępne. Szczególnie wrażliwe są argumenty literałowe, `nullptr`, konstrukcje listowe i szablony z szeroką dedukcją. Testy interfejsu powinny obejmować typy argumentów rzeczywiście używane przez klientów, nie tylko wywołanie z dokładnie zadeklarowanym typem parametru. `0` ma historyczną rolę null pointer constant, której nie zachowuje automatycznie po dedukcji jako zwykły `int` w wrapperze.
+
+Wywołanie funkcji składowej uwzględnia także obiekt odbiorcy. Kwalifikatory `const`, `&` i `&&` decydują, które metody są dostępne oraz jak dobrze pasują. Pozwala to zwracać widok z trwałego obiektu i wartość z obiektu tymczasowego. Różnice te należą do publicznego kontraktu, więc dopisanie pozornie wygodnego przeciążenia bez kwalifikatora referencyjnego może osłabić ochronę przed wiszącymi widokami.
+
+Operatory porównania w C++20 i późniejszych standardach dodają rewritten candidates, między innymi związane z odwróceniem argumentów oraz wykorzystaniem `<=>`. Projektując mieszane porównania dwóch typów, sprawdzaj oba porządki operandów. Nie zakładaj, że analiza zwykłej nazwanej funkcji wyczerpuje wszystkie reguły dla operatorów.
+
+ADL może zostać powstrzymane przez wynik zwykłego lookup, na przykład znalezienie określonej składowej klasy lub deklaracji niebędącej funkcją. Dlatego lokalna zmienna o nazwie punktu dostosowania potrafi zmienić znaczenie niekwalifikowanego wywołania. Podczas diagnozy sprawdź deklaracje widoczne w bieżącym zakresie, zanim uznasz, że funkcja z przestrzeni argumentu powinna zawsze uczestniczyć w wyborze. Oczekiwane przez bibliotekę miejsce dostosowania powinno być wyraźnie udokumentowane.
 
 ## Powiązane tematy
 

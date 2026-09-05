@@ -34,40 +34,60 @@ Kodowanie UTF-8 mieści się w `std::string`, lecz `size()` zwraca liczbę bajt�
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „string, string_view i tekst”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie zakresu, wykonanie operacji zgodnie z wymaganiami iteratora i aktualizację stanu kontenera wraz z regułami invalidacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij właściciela elementów od widoku, kolejność logiczną od fizycznego układu i gwarancję złożoności od konkretnego czasu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź rozmiar i capacity, ważność iteratorów, liczbę alokacji, kolejność elementów oraz klasę złożoności. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym przykładzie parametr `name` kopiuje tylko opis zakresu, a nie jego znaki. Instrukcja `std::string result{name}` tworzy niezależnego właściciela. Zmiana pierwszego bajtu dotyczy już kopii, więc wejściowy napis pozostaje niezmieniony. Zwrócenie wartości pozwala kompilatorowi zastosować NRVO; nawet bez tej optymalizacji poprawność nie zależy od życia lokalnego bufora, ponieważ wynik jest przenoszony lub kopiowany zgodnie z regułami języka.
 
-Model dla tej części kompendium jest następujący: Kontenery i algorytmy biblioteki standardowej mają kontrakty dotyczące złożoności, invalidacji, własności oraz zakresów. Poprawny wybór wynika z wymaganych operacji i stabilności adresów, nie z przyzwyczajenia do jednego kontenera. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Inaczej działa `std::string_view{text}.substr(0, 3)`: powstaje drugi widok, ograniczony do trzech pierwszych elementów istniejącego napisu. Operacja nie tworzy nowej tablicy znaków. Jeśli potrzebujesz trwałego wycinka do zapisania w obiekcie, `std::string{wycinek}` jest jawnym momentem przejęcia własności. Warto rozdzielić etap parsowania bez kopii od etapu utrwalania wybranych pól.
+
+Przy wyszukiwaniu sprawdzaj wynik względem `npos`, zanim dodasz jeden lub wykonasz indeksowanie. `npos` jest maksymalną wartością typu rozmiaru, więc arytmetyka bez sprawdzenia może zawinąć się modulo. `substr(pos, count)` obcina zbyt duże `count`, lecz `pos > size()` powoduje `std::out_of_range`. Dla `remove_prefix(n)` obowiązuje warunek `n <= size()`; nie jest to funkcja walidująca dowolną liczbę.
 
 ## Pogłębienie mechanizmu
 
-- `span` i `string_view` są niewłaścicielskimi widokami; kopiowanie widoku nie przedłuża lifetime danych. API powinno dokumentować zależność czasową i unikać zwracania widoku do obiektu lokalnego lub tymczasowego napisu.
-- `std::string` posiada bufor i gwarantuje zakończenie zerem dla `c_str`, a `string_view` przechowuje wskaźnik oraz długość bez własności. Bajty napisu nie określają automatycznie kodowania ani liczby znaków użytkownika.
+Widok nie obiecuje niezmienności źródła. Nie pozwala modyfikować znaków przez własny interfejs, ale właściciel nadal może je zmienić. Zastąpienie istniejącego elementu przez `text[0] = 'X'` nie wymaga przenoszenia bufora i jest widoczne przez widok. Operacja mogąca unieważnić bufor, taka jak rozbudowa napisu, wymaga ponownego utworzenia widoków. Nie opieraj bezpieczeństwa na zaobserwowanej pojemności ani implementacyjnej optymalizacji małych napisów, zwanej SSO.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „string, string_view i tekst” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Konstruktor ze wskaźnika C wyznacza długość do pierwszego zera; konstruktor ze wskaźnika i długości zachowuje także wewnętrzne zera. Analogicznie literał `"a\0b"sv` ma długość trzy, podczas gdy `std::string_view{"a\0b"}` ma długość jeden. Końcowy terminator napisu właścicielskiego nie należy do zakresu jego zwykłych elementów. W szczególności odczyt `view[view.size()]` narusza wymagania widoku, choć podobna pozycja w `std::string` ma specjalnie określone znaczenie.
+
+Od C++20 literał `u8"..."` zawiera elementy `char8_t`. `std::u8string` opisuje jednostki kodowe UTF-8, ale nadal nie sprawdza poprawności całej sekwencji podczas każdej modyfikacji. `wchar_t` także nie jest przenośną obietnicą pełnego znaku Unicode: jego szerokość i kodowanie zależą od implementacji. W API zapisuj osobno format kodowania i reguły własności.
+
+Dla protokołów liczbowych `from_chars` i `to_chars` z `<charconv>` rozdzielają konwersję od własności napisu. Parser dostaje jawne granice bufora i zwraca pozycję końcową oraz kod błędu. Nie wymaga terminatora ani aktualnej locale. Dołączanie fragmentów w pętli może natomiast wielokrotnie alokować: jeśli znasz całkowity rozmiar, zarezerwuj miejsce w jednym napisie i dopisuj do niego. Warto mierzyć alokacje całej operacji, a nie tylko koszt skopiowania małego widoku.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Parser oddziela nazwę od wartości bez alokowania. Zwracany widok pożycza pamięć argumentu; to istotna część kontraktu funkcji.
 
-~~~text
-Temat: string, string_view i tekst
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <optional>
+#include <string>
+#include <string_view>
+
+std::optional<std::string_view> value_part(std::string_view line) {
+    const auto equal = line.find('=');
+    if (equal == std::string_view::npos) {
+        return std::nullopt;
+    }
+    return line.substr(equal + 1);
+}
+
+int main() {
+    const std::string line = "mode=fast";
+    const auto borrowed = value_part(line);
+    assert(borrowed && *borrowed == "fast");
+    const std::string saved{*borrowed};
+    assert(saved == "fast");
+    assert(value_part("key=")->empty());
+    assert(!value_part("missing"));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Rozróżniamy brak separatora i poprawną pustą wartość. `optional` odpowiada za obecność pola, a `string_view` za jego lokalizację; żaden z tych typów nie przedłuża życia `line`. Wywołanie parsera z tymczasowym `std::string` i zachowanie wyniku na później stworzyłoby wiszący widok po zakończeniu pełnego wyrażenia.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „string, string_view i tekst”, oceniaj wzorzec dostępu, lokalność danych, stabilność referencji, koszt modyfikacji i możliwość użycia gotowego algorytmu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Przyjmuj `string_view` przez wartość do synchronicznego odczytu, `string&` do modyfikowania cudzego napisu, a `string` do przejęcia tekstu przechowywanego na później. Nie zwracaj bezrefleksyjnie widoku z każdej funkcji tylko dlatego, że jest mały. Bezpieczny wynik właścicielski często upraszcza życie klienta bardziej niż oszczędność pojedynczej kopii.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy przechowanie `value_part(std::string{"a=b"})` w zmiennej i odczyt w następnej instrukcji jest poprawne? **Odpowiedź:** nie. Tymczasowy właściciel znika na końcu instrukcji inicjalizacji. Rozwiązaniem jest nazwana zmienna `string` żyjąca dłużej niż widok albo skopiowanie wyniku do `string`, zanim tymczasowy właściciel zostanie zniszczony.
+
+Źródła reguł: [C++23: string_view](https://timsong-cpp.github.io/cppwp/n4950/string.view), [wymagania basic_string](https://timsong-cpp.github.io/cppwp/n4950/string.require).
 
 ## Powiązane tematy
 

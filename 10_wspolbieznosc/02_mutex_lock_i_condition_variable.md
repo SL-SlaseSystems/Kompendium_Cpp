@@ -36,43 +36,92 @@ Deadlock nie jest automatycznie UB, ale program przestaje robić postęp. Ustal 
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „mutex, lock i condition_variable”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz publikację danych, ustanowienie synchronizacji, wykonanie pracy przez wiele wątków i bezpieczne zakończenie lub anulowanie. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wzajemne wykluczanie, komunikację, postęp algorytmu i czas życia danych współdzielonych. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant chroniony blokadą, memory order, ownership wątku, ślad TSan i test kontrolowanego zamknięcia. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W przykładzie każdy pracownik przed zwiększeniem licznika przejmuje ten sam mutex. Dzięki wzajemnemu wykluczaniu tylko jeden z nich wykonuje w danej chwili odczyt, dodanie i zapis chronionego licznika. Zwolnienie mutexa synchronizuje się z odpowiednim późniejszym przejęciem go, więc następny właściciel widzi zmiany poprzednika. Sam typ zmiennej `counter` nie potrzebuje atomic, ponieważ wszystkie konkurencyjne modyfikacje są chronione.
 
-Model dla tej części kompendium jest następujący: Współbieżny program opisuje relacje happens-before między operacjami. Sam czas zegarowy lub obserwowana kolejność logów nie ustanawia synchronizacji; dostęp do współdzielonego, nieatomowego obiektu bez właściwej relacji może być data race i UB. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Zakres nazwanego `lock_guard` określa sekcję krytyczną. Tymczasowy strażnik bez nazwy, utworzony i porzucony w jednej instrukcji, odblokowałby mutex natychmiast na końcu tej instrukcji. To częsty błąd składniowy, którego programista nie zauważa, widząc pozornie poprawne użycie RAII. Strażnik musi żyć przez cały czas wykonywania operacji wymagających ochrony.
+
+Oczekiwanie na condition variable zaczyna się od przejęcia mutexa i sprawdzenia predykatu. Jeśli jest fałszywy, `wait` atomowo zwalnia mutex i przechodzi do oczekiwania. Po obudzeniu ponownie przejmuje mutex, dopiero potem sprawdza stan. Ten protokół zapobiega luce między sprawdzeniem warunku a rozpoczęciem czekania, w której producent mógłby dostarczyć dane i wysłać zgubione powiadomienie.
 
 ## Pogłębienie mechanizmu
 
-- Mutex chroni inwariant współdzielonego stanu, a lock guard koduje zwolnienie przez RAII. Condition variable może obudzić się pozornie, dlatego czekanie zawsze powtarza predykat pod tą samą blokadą.
+Powiadomienie nie jest przechowywaną wartością. Jeżeli producent zmieni stan wcześniej, późniejszy konsument zobaczy prawdziwy predykat i w ogóle nie musi czekać. Dlatego to kolejka, flaga zakończenia lub licznik reprezentuje fakty, a condition variable tylko pomaga spać do chwili możliwej zmiany. Spurious wakeup jest dodatkowym powodem używania predykatu, ale nie jedynym: inny konsument może odebrać element przed ponownym przejęciem mutexa.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „mutex, lock i condition_variable” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Zwykle producent zmienia stan pod blokadą, wychodzi z sekcji krytycznej i dopiero powiadamia. Odbiorca po obudzeniu nie musi wtedy natychmiast czekać na ten sam mutex. Trzeba jednak zapewnić, że condition variable nadal istnieje podczas notify. Reguła czasu życia może uzasadniać inny układ. `notify_all` jest odpowiednie przy zamykaniu, gdy wszyscy oczekujący muszą sprawdzić stan końcowy; przy jednym nowym elemencie często wystarcza `notify_one`.
+
+`unique_lock` potrafi przenosić własność i tymczasowo zwalniać blokadę. `scoped_lock` z kilkoma różnymi mutexami korzysta z protokołu unikającego deadlocka przy ich zdobywaniu. Nie naprawia jednak cyklu obejmującego blokady już trzymane gdzie indziej. Przekazanie tego samego nierekurencyjnego mutexa dwukrotnie nie jest poprawnym zamiennikiem usunięcia duplikatu.
+
+Przy oczekiwaniu z limitem nie ponawiaj bezmyślnie pełnego `wait_for` po każdym obudzeniu, bo całkowity czas może przekroczyć budżet. Ustal termin na `steady_clock` i używaj `wait_until` z predykatem. Upływ czasu nie dowodzi, że stan jest fałszywy poza blokadą; stan należy interpretować w ramach tego samego protokołu ochrony.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Kolejka przechowuje dane oraz trwały stan zamknięcia. Po zamknięciu konsument opróżnia pozostałe elementy, a następnie otrzymuje brak wyniku.
 
-~~~text
-Temat: mutex, lock i condition_variable
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <optional>
+#include <thread>
+
+class Queue {
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::deque<int> data_;
+    bool closed_ = false;
+public:
+    bool push(int value) {
+        {
+            std::lock_guard lock{mutex_};
+            if (closed_) return false;
+            data_.push_back(value);
+        }
+        changed_.notify_one();
+        return true;
+    }
+    void close() {
+        {
+            std::lock_guard lock{mutex_};
+            closed_ = true;
+        }
+        changed_.notify_all();
+    }
+    std::optional<int> pop() {
+        std::unique_lock lock{mutex_};
+        changed_.wait(lock, [&] { return closed_ || !data_.empty(); });
+        if (data_.empty()) return std::nullopt;
+        const int result = data_.front();
+        data_.pop_front();
+        return result;
+    }
+};
+
+int main() {
+    Queue queue;
+    int sum = 0;
+    std::jthread consumer([&] {
+        while (const auto item = queue.pop()) sum += *item;
+    });
+    for (int i = 1; i <= 3; ++i) queue.push(i);
+    queue.close();
+    consumer.join();
+    assert(sum == 6);
+    assert(!queue.push(4));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Klasa nie zwraca referencji do elementu chronionego kontenera, która mogłaby uciec poza zakres blokady. Zarówno sprawdzenie pustki, jak i usunięcie są jedną operacją pod mutexem. Właściciel zapewnia, że kolejka przeżyje konsumenta. Sam destruktor kolejki nie zamyka magicznie trwających wywołań; pełny system musi wyegzekwować zakończenie wszystkich użytkowników przed zniszczeniem.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „mutex, lock i condition_variable”, oceniaj najprostszy poprawny model, możliwość anulowania, brak data race, ograniczone contention i udowodniony lifetime. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Mutex dobrze chroni inwariant obejmujący kilka pól i złożone operacje. Atomik jest odpowiedni dla węższych protokołów, ale nie zamieni automatycznie całej kolejki w bezpieczną strukturę. Shared mutex ma sens tylko po pomiarze wzorca czytelników i pisarzy; standard nie daje uniwersalnej obietnicy sprawiedliwego harmonogramu ani braku zagłodzenia.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dlaczego osobne metody `empty()` i `pop()` nie tworzą bezpiecznej operacji nawet wtedy, gdy każda blokuje mutex? **Odpowiedź:** między wywołaniami inny konsument może usunąć ostatni element. Potrzebna jest metoda łącząca sprawdzenie i odebranie pod jedną blokadą, z jasno określonym zachowaniem dla pustej kolejki.
+
+Źródła reguł: [C++23: mutexy](https://timsong-cpp.github.io/cppwp/n4950/thread.mutex), [condition variables](https://timsong-cpp.github.io/cppwp/n4950/thread.condition), [obiekty blokad](https://timsong-cpp.github.io/cppwp/n4950/thread.lock).
 
 ## Powiązane tematy
 
 - [Wątki i jthread](01_thread_jthread_i_stop_token.md)
 - [Atomiki](04_atomiki_i_model_pamieci.md)
 - [Sanitizery i TSan](../09_testowanie_i_jakosc/03_sanitizery_i_debuggery.md)
-

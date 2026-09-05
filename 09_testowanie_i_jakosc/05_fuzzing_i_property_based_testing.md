@@ -31,43 +31,77 @@ Property powinno być mocniejsze niż powtórzenie implementacji. Przydatne są 
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Fuzzing i property-based testing”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz sformułowanie hipotezy, przygotowanie kontrolowanego wejścia, zebranie wyniku, porównanie z oczekiwaniem i zachowanie reprodukcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd funkcjonalny, undefined behavior, problem przenośności i regresję wydajności, ponieważ wymagają innych narzędzi. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przypadek, kod wyjścia, raport sanitizera, statystyczny rozkład pomiarów i konfigurację kompilacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Harness otrzymuje dowolną sekwencję bajtów i przekazuje ją funkcji pod testem. Pierwszym wymaganiem jest bezpieczna obsługa pustego oraz bardzo krótkiego wejścia. Parser nie może odczytywać nagłówka przed sprawdzeniem długości. Dla formatu zawierającego deklarowany rozmiar sprawdź relację do rzeczywistego bufora i unikaj przepełnienia przy obliczaniu końcowej pozycji.
 
-Model dla tej części kompendium jest następujący: Żadne pojedyncze narzędzie nie dowodzi poprawności programu C++. Test sprawdza zachowanie dla danych, analiza statyczna szuka wzorców, sanitizer obserwuje wykonanie, a profiler mierzy koszt; wiarygodność daje dopiero połączenie niezależnych dowodów. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Fuzzer uruchamia instrumentowany program, obserwuje nowe pokrycie i zachowuje wejścia otwierające nowe ścieżki. Mutacje tych wejść pomagają docierać głębiej niż zupełnie losowe bajty. Warto dostarczyć niewielki corpus poprawnych oraz błędnych przykładów i ewentualny słownik tokenów formatu. Jednocześnie harness nie powinien odrzucać niemal wszystkich danych na wstępie, zanim dotrą do właściwego parsera.
+
+Po znalezieniu awarii utrwal dokładny plik, konfigurację kompilacji i raport. Minimalizacja usuwa zbędne części wejścia przy zachowaniu objawu, co ułatwia diagnozę. Napraw przyczynę, a następnie dodaj najmniejszy przypadek do testów regresyjnych i ponownie uruchom kampanię. Sam brak awarii dla jednego znalezionego pliku nie oznacza, że wszystkie pokrewne ścieżki zostały naprawione.
 
 ## Pogłębienie mechanizmu
 
-- Fuzzer mutuje wejścia i wykorzystuje pokrycie do docierania do nowych ścieżek, a property-based testing generuje przypadki sprawdzające inwariant. Sanitizery zwiększają zdolność obu metod do wykrycia cichego UB.
+Fuzzer potrzebuje wyroczni, czyli sposobu rozpoznania niepoprawnego zachowania. Awaria procesu i raport sanitizatora są jednymi z możliwości, ale wiele błędów parsera daje po prostu złą wartość. Możesz sprawdzać inwariant, porównywać wynik z niezależną implementacją albo testować relację między kilkoma wykonaniami. Nie traktuj każdego normalnego odrzucenia niepoprawnego wejścia jako awarii.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Fuzzing i property-based testing” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Round-trip wymaga określenia dziedziny i równoważności. `decode(encode(x)) == x` ma sens dla wartości, które format potrafi reprezentować. Odwrotne `encode(decode(bytes)) == bytes` może być fałszywe dla poprawnego dekodera, jeśli format dopuszcza wiele równoważnych reprezentacji i enkoder wybiera kanoniczną. Wtedy właściwa jest zgodność semantyczna, a nie identyczność bajtów.
+
+Własność idempotencji, np. `normalize(normalize(x)) == normalize(x)`, bywa użyteczna, lecz sama nie wystarcza: funkcja zawsze zwracająca pusty napis także może ją spełnić. Łącz ją z zachowaniem znaczenia lub ograniczeniami wyjścia. Test porównujący implementację z identycznym kodem przepisanym do testu może powielać ten sam błąd. Prostszą referencję wolno stosować tylko dla małych wejść, nawet jeśli jest dużo wolniejsza.
+
+Harness powinien być szybki, deterministyczny dla tego samego wejścia i odporny na narastanie globalnego stanu między wywołaniami. Ogranicz pamięć, czas i rozmiary tak, aby pojedynczy przypadek nie blokował całej kampanii. Odróżnij rzeczywistą złożoność algorytmiczną prowadzącą do odmowy usługi od zwykłego testu z arbitralnie zbyt krótkim limitem czasu. Losowe opóźnienia, sieć i zegar ścienny utrudniają odtwarzanie wyników.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniższy test własności sprawdza round-trip liczb całkowitych przez standardowe funkcje konwersji. Korzysta z ustalonego ziarna i dodaje granice jawnie, zamiast liczyć, że generator kiedyś je trafi.
 
-~~~text
-Temat: Fuzzing i property-based testing
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <charconv>
+#include <limits>
+#include <random>
+#include <system_error>
+
+bool round_trip(int value) {
+    std::array<char, 64> buffer{};
+    const auto encoded = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (encoded.ec != std::errc{}) return false;
+    int decoded = 0;
+    const auto parsed = std::from_chars(buffer.data(), encoded.ptr, decoded);
+    return parsed.ec == std::errc{} && parsed.ptr == encoded.ptr && decoded == value;
+}
+
+int main() {
+    for (int value : {0, 1, -1, std::numeric_limits<int>::min(),
+                      std::numeric_limits<int>::max()}) {
+        if (!round_trip(value)) return 1;
+    }
+    std::mt19937 generator{2026};
+    std::uniform_int_distribution<int> distribution{-1'000'000, 1'000'000};
+    for (int i = 0; i < 10000; ++i) {
+        if (!round_trip(distribution(generator))) return 1;
+    }
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Test wymaga implementacji `int` reprezentującej użyty zakres generatora. Nie sprawdza niepoprawnych zapisów, ponieważ wszystkie teksty pochodzą z `to_chars`. Osobny test parsera powinien generować błędne znaki, nadmiarowe końcówki i liczby poza zakresem. Sprawdzenie `parsed.ptr` jest ważne: konwersja poprawnego prefiksu nie oznacza akceptacji całego tekstu.
+
+~~~text
+# Typowy sposób budowania harnessu libFuzzer w obsługiwanym Clang:
+clang++ -std=c++23 -g -O1 -fsanitize=fuzzer,address,undefined \
+    fuzz_parser.cpp parser.cpp -o fuzz_parser
+mkdir -p corpus
+./fuzz_parser corpus -max_total_time=60
+~~~
+
+Plik harnessu definiuje wymagany entry point libFuzzer zamiast zwykłego `main`; runtime dostarcza pętlę sterującą. Polecenia nie dotyczą każdego kompilatora C++ i wymagają zainstalowanego odpowiedniego runtime.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Fuzzing i property-based testing”, oceniaj zdolność wykrycia realnej regresji, powtarzalność, koszt utrzymania testu i reprezentatywność środowiska. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Property-based testing najlepiej wyraża reguły domeny i zwykle oferuje generowanie oraz zmniejszanie przypadków. Coverage-guided fuzzing szczególnie dobrze eksploruje parsery i zależne od danych ścieżki. Testy przykładów pozostają potrzebne do ważnych, nazwanych scenariuszy. Te sposoby uzupełniają się, jeśli współdzielą sensowne inwarianty oraz zbiór znalezionych regresji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Enkoder i dekoder zamieniają kolejność dwóch pól w zgodny sposób, więc round-trip przechodzi. Jak wykryć błąd formatu? **Odpowiedź:** dodaj niezależne znane wektory kodowania albo porównanie z inną implementacją. Wzajemnie zgodne błędy dwóch funkcji mogą spełniać relację odwracalności, a mimo to naruszać specyfikację protokołu.
+
+Źródła: [LLVM libFuzzer](https://llvm.org/docs/LibFuzzer.html), [RapidCheck: testy własności](https://github.com/emil-e/rapidcheck), [C++23: konwersje znakowe](https://timsong-cpp.github.io/cppwp/n4950/charconv).
 
 ## Powiązane tematy
 
 - [Testy jednostkowe](01_testy_jednostkowe_i_integracyjne.md)
 - [Sanitizery](03_sanitizery_i_debuggery.md)
 - [Sieć i serializacja](../11_io_i_system/05_siec_serializacja_i_granice_std.md)
-

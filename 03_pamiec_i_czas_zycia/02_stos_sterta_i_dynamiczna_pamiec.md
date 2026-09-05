@@ -30,39 +30,58 @@ Własne kontenery, alokatory, interoperacyjność z C i kod embedded czasem wyma
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Stos, sterta i dynamiczna pamięć”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wyrażenie `new T(args)` obejmuje znalezienie funkcji alokującej, uzyskanie odpowiedniego miejsca i inicjalizację obiektu. Zwrócony wskaźnik odnosi się do gotowego obiektu, jeżeli całość się powiedzie. Zwykła rzucająca alokacja sygnalizuje brak pamięci wyjątkiem `std::bad_alloc`. Wersja `new (std::nothrow)` może zwrócić pusty wskaźnik przy niepowodzeniu alokacji, lecz konstruktor `T` nadal może rzucić własny wyjątek.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Jeśli konstruktor rzuci po uzyskaniu pamięci przez zwykłe `new`, odpowiednio dopasowana funkcja zwalniająca sprząta tę pamięć. Destruktor kompletnego `T` nie jest wtedy uruchamiany, ponieważ obiekt nie został w pełni skonstruowany. Sprzątane są już zbudowane podobiekty. To nie ochroni jednak surowego zasobu, który konstruktor przejął do zwykłego pola wskaźnikowego przed późniejszą porażką.
+
+`delete p` wywołuje destruktor, a następnie zwalnia miejsce zgodnie z właściwą operacją dealokacji. Dla pustego wskaźnika nie niszczy obiektu. Nie ustawia automatycznie wszystkich kopii wskaźnika na `nullptr`. Po zwolnieniu stare aliasy stają się niebezpieczne. `delete[]` dodatkowo odpowiada za wszystkie elementy tablicy; nie można zastępować go pojedynczym `delete`.
 
 ## Pogłębienie mechanizmu
 
-- Stos i sterta są popularnymi opisami implementacji, podczas gdy standard definiuje storage duration i mechanizmy alokacji. `new` najpierw uzyskuje storage, potem konstruuje obiekt; `delete` niszczy obiekt i zwalnia odpowiednią alokację.
+Lokalny `std::vector<int>` jest automatycznym obiektem zarządzającym, ale jego elementy zwykle znajdują się w osobnym dynamicznym buforze. Zniszczenie lokalnego wektora wywołuje destrukcję elementów i zwolnienie tego bufora. Dlatego pytanie „czy wektor jest na stosie?” jest zbyt mało precyzyjne: należy osobno wskazać obiekt zarządzający i przechowywane dane.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Stos, sterta i dynamiczna pamięć” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`reserve(n)` zapewnia pojemność co najmniej `n`, ale nie zmienia rozmiaru. `resize(n)` tworzy lub niszczy elementy, a w razie potrzeby także alokuje. Gdy `reserve` rzeczywiście powoduje realokację, wszystkie wskaźniki, referencje i iteratory do elementów zostają unieważnione. Bez realokacji pozostają ważne. Nie wolno przewidywać dokładnego mnożnika wzrostu pojemności jako przenośnej gwarancji.
+
+`malloc` i `free` pochodzą z biblioteki C i nie wykonują konstruktorów ani destruktorów C++. Współczesny model dopuszcza pewne niejawne tworzenie obiektów typów implicit-lifetime w przydzielonym miejscu, ale nie czyni z `malloc` zamiennika konstrukcji dowolnej klasy, takiej jak `std::string`. Nie mieszaj rodzin alokacji i zwalniania. Umowa z biblioteką C powinna wskazywać dokładnie funkcję zwalniającą jej wynik.
+
+Nawet poprawny model własności może być kosztowny, jeśli wykonuje jedną alokację dla każdej małej wartości. Ciągły bufor zwykle poprawia lokalność danych, lecz jego realokacja zmienia adresy. Oddzielne obiekty zarządzane przez `unique_ptr` stabilizują adresy samych wartości kosztem wielu alokacji i pośrednich dostępów. Wybór wynika z wymagania stabilności adresów oraz pomiaru rzeczywistego obciążenia.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Alokator pozwala osobno uzyskać miejsce i rozpocząć życie obiektu. Przykład edukacyjny zawiera sprzątanie zarówno po udanej konstrukcji, jak i po wyjątku konstruktora.
 
-~~~text
-Temat: Stos, sterta i dynamiczna pamięć
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <memory>
+#include <string>
+
+int main() {
+    std::allocator<std::string> allocator;
+    std::string* storage = allocator.allocate(1);
+    std::string* object = nullptr;
+    try {
+        object = std::construct_at(storage, "C++");
+    } catch (...) {
+        allocator.deallocate(storage, 1);
+        throw;
+    }
+    assert(*object == "C++");
+    std::destroy_at(object);
+    allocator.deallocate(storage, 1);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pomiędzy `allocate` a `construct_at` nie ma jeszcze skonstruowanego napisu, którego metody można wywoływać. Po `destroy_at` napis przestaje istnieć, ale miejsce jest nadal przydzielone aż do `deallocate`. W kodzie aplikacyjnym te operacje powinien wykonywać kontener albo mały obiekt RAII. Przykład celowo ujawnia etapy, które zwykle pozostają ukryte.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Stos, sterta i dynamiczna pamięć”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj zwykłą wartość, gdy czas życia odpowiada zakresowi i nie potrzebujesz dynamicznego rozmiaru ani stabilnej niezależnej tożsamości. Dla sekwencji używaj kontenera. Dynamiczny pojedynczy obiekt najczęściej powinien od razu trafić do `unique_ptr`. Sam fakt, że wartość jest duża, nie uzasadnia rozproszenia wszystkich jej części w osobnych alokacjach.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy po `auto p = std::make_unique<int>(7); int* raw = p.get(); p.reset();` przypisanie `raw = nullptr` naprawia wcześniejsze użycie `*raw` wykonane po `reset`?
+
+**Odpowiedź.** Nie. `reset` zniszczył obiekt i zwolnił pamięć. Późniejsze wyzerowanie obserwatora może zapobiec następnym pomyłkom, lecz nie cofa już wykonanego użycia po zwolnieniu. Obserwator powinien przestać być używany najpóźniej przed zakończeniem własności.
+
+Źródła: [wyrażenie new](https://timsong-cpp.github.io/cppwp/n4950/expr.new), [wyrażenie delete](https://timsong-cpp.github.io/cppwp/n4950/expr.delete), [zarządzanie pojemnością vector](https://timsong-cpp.github.io/cppwp/n4950/vector.capacity).
 
 ## Powiązane tematy
 

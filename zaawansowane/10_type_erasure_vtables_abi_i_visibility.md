@@ -54,40 +54,62 @@ Visibility ogranicza eksport symboli z shared library. Ukrycie implementacyjnych
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Type erasure, vtables, ABI i visibility”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Konstruktor `AnyArea` dedukuje `Square`, tworzy `Model<Square>` i zapisuje wskaźnik do interfejsu. Konkretna wartość nadal istnieje; wymazany został jedynie jej typ z publicznego interfejsu wrappera. `shape.area()` przekazuje wywołanie przez interfejs do implementacji modelu, która zna `Square` i wywołuje jego zwykłą metodę. Użytkownik `Square` nie musi dziedziczyć po bibliotecznej klasie bazowej.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Kopia wrappera wywołuje `clone`, tworząc nowy model i kopiując wartość. Dzięki temu dwie kopie nie współdzielą ukradkiem mutowalnego obiektu. Przeniesienie `unique_ptr` przekazuje własność modelu bez kopiowania `Square`. Przypisanie przez wartość przygotowuje kopię lub przeniesienie przed wejściem do ciała, a następnie wykonuje niezgłaszający wyjątków swap. Wyjątek przy tworzeniu parametru nie zmienia dotychczasowej wartości obiektu docelowego.
 
 ## Pogłębienie mechanizmu
 
-- Value semantics oznacza, że kopia reprezentuje niezależną wartość z przewidywalną równością. Type erasure ukrywa konkretny typ za wspólnym kontraktem przez wskaźnik funkcji, vtable lub mały bufor.
-- Vtable i key function są elementami ABI implementacji, nie normatywną reprezentacją standardu. Ukryta visibility zmniejsza publiczną powierzchnię symboli i umożliwia optymalizacje, ale musi być spójna z eksportowanym API.
+Type erasure musi określić pełny zestaw operacji, nie tylko wywołanie domenowe. Potrzebuje zniszczenia, odpowiedniego przeniesienia, opcjonalnego kopiowania i zwykle reprezentacji pustego stanu. W przykładzie obiekt po przeniesieniu ma pusty `self_`; wywołanie na nim `area()` lub kopiowanie bez obsługi pustki byłoby błędem. Uproszczony kontrakt dopuszcza po przeniesieniu destrukcję i ponowne przypisanie; produkcyjna klasa może jawnie obsłużyć pusty stan lub zabronić takich operacji warunkiem wstępnym.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Type erasure, vtables, ABI i visibility” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Small-buffer optimization przechowuje małe modele wewnątrz wrappera. Warunkiem nie jest sam rozmiar: potrzebne jest dostateczne wyrównanie oraz odpowiednia gwarancja przenoszenia, jeżeli wrapper obiecuje `noexcept` move. Model duży, nadmiernie wyrównany albo potencjalnie rzucający podczas przenoszenia może wymagać alokacji. Zamiana aktywnej reprezentacji lokalnej i dynamicznej musi poprawnie zarządzać lifetime; bytewise swap nie działa dla każdego modelu.
+
+Tablica wskaźników do funkcji i klasy wirtualne to dwie implementacje podobnej abstrakcji. Standard określa zachowanie virtual dispatch, ale nie wymaga fizycznego vptr na początku obiektu ani konkretnego formatu vtable. Dziedziczenie wielokrotne może wymagać korekt adresu `this`, a kompilator może zdevirtualizować wywołanie, gdy zna dynamiczny typ. Liczba odczytów pamięci w pojedynczym ABI nie jest przenośną miarą kosztu C++.
+
+ABI obejmuje również sposób zwracania wartości, przekazywania argumentów, rozwijania stosu przy wyjątkach, identyfikacji RTTI i alokacji. Ukrycie prywatnych symboli nie usuwa zależności od ABI typów występujących w sygnaturze. `std::function<void()>` może mieć odmienny layout w libc++ i libstdc++; przekazywanie go przez granicę niezależnie budowanych pluginów wymaga uzgodnionego toolchainu. PIMPL ogranicza zmiany reprezentacji klasy, ale nie ustanawia automatycznej zgodności między kompilatorami.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <functional>
 
-~~~text
-Temat: Type erasure, vtables, ABI i visibility
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct Counter {
+    int value = 0;
+    int operator()() { return ++value; }
+};
+int main() {
+    std::function<int()> first = Counter{};
+    auto second = first;
+    assert(first() == 1);
+    assert(first() == 2);
+    assert(second() == 1);
+    int shared = 0;
+    std::function<int()> borrowed = [&shared] { return ++shared; };
+    auto another = borrowed;
+    assert(borrowed() == 1 && another() == 2);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwsze kopiowanie kopiuje obiekt `Counter`, więc liczniki rozwijają się niezależnie. Drugie kopiuje lambdę zawierającą referencję, więc oba wrappery odnoszą się do tego samego `shared`. Wymazanie typu nie zmienia semantyki kopiowania ani własności modelu. Obiekt przechowujący callable przez wartość może nadal zawierać pożyczone referencje, których lifetime należy zabezpieczyć osobno.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Type erasure, vtables, ABI i visibility”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+`variant` sprawdza się przy zamkniętej liście typów i pozwala odwiedzać wszystkie alternatywy. Type erasure pozwala przyjmować nowe typy bez rozszerzania listy, ale zamyka zestaw dostępnych operacji w interfejsie. Szablon zachowuje konkretny typ i możliwości inliningu kosztem instancjacji oraz zależności kompilacyjnych. Wybór dotyczy miejsca, w którym ma przebiegać granica abstrakcji, a nie ogólnej wyższości jednej techniki.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy skopiowanie `std::function` gwarantuje niezależność zasobów używanych przez funkcję? **Odpowiedź:** kopiuje callable, którego pola mogą współdzielić zasoby albo referencje. Czy typ z `unique_ptr` może być zwykłym celem kopiowalnego `std::function`? Zwykle nie spełnia wymagań kopiowalności; C++23 oferuje `move_only_function` dla odpowiedniego kontraktu. Pusty stan i wywołanie pustego wrappera mają różne reguły w tych dwóch klasach.
+
+Źródła: [N4950: function wrappers](https://timsong-cpp.github.io/cppwp/n4950/func.wrap) oraz [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html).
+
+### Pożyczone i posiadające wymazanie typu
+
+Nie każdy wrapper wymazujący typ musi posiadać model. Widok funkcji może przechowywać wskaźnik do istniejącego callable i wskaźnik do funkcji pośredniczącej. Unika alokacji i kopiowania modelu, ale wymaga, aby callable przeżył wszystkie wywołania widoku. Przekazanie takiego widoku do synchronicznego algorytmu jest inną umową niż zapisanie go jako callbacka wykonywanego później. Rozróżnienie powinno być widoczne w nazwie i dokumentacji typu.
+
+Własny wrapper kopiowalny powinien ograniczać konstruktor do modeli spełniających jego wymagania. Inaczej próba przechowania modelu move-only ujawni błąd dopiero wewnątrz implementacji `clone`. Concept może sprawdzić kopiowanie i typ wyniku `area`, ale nie dowiedzie semantycznie, że powierzchnia jest nieujemna lub nie zmienia modelu. Te własności pozostają kontraktem domenowym.
+
+Na granicy biblioteki dynamicznej funkcje pośredniczące mogą znajdować się w kodzie pluginu. Nawet gdy model pozostaje w żywej pamięci, wyładowanie biblioteki usuwa kod potrzebny do wywołania lub zniszczenia wrappera. Zasada lifetime obejmuje zatem także moduł z kodem implementacji. Menedżer pluginów musi utrzymać bibliotekę załadowaną tak długo, jak istnieją zależne od niej modele.
+
+Koszt wymazania typu warto rozbić na utworzenie wrappera, wywołanie i zniszczenie. Alokacja modelu może dominować w krótkim zadaniu, natomiast w wielokrotnie uruchamianym kosztownym callbacku narzut pojedynczego pośredniego wywołania może być nieistotny. Benchmark mierzący tylko puste wywołania nie odpowiada automatycznie zachowaniu rzeczywistego obciążenia aplikacji.
 
 ## Powiązane tematy
 

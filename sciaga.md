@@ -82,7 +82,7 @@ int main() {
 }
 ~~~
 
-Preferuj rule of zero. Dla polimorficznej bazy: virtual destructor, `override` i przechowywanie przez referencję/smart pointer zamiast wartości bazowej.
+Preferuj rule of zero. Jeśli wolno niszczyć obiekt przez wskaźnik do bazy, baza potrzebuje odpowiedniego wirtualnego destruktora; alternatywny projekt może zabraniać takiego usuwania przez chroniony niewirtualny destruktor. Używaj `override` i unikaj slicing przy przechowywaniu wartości bazowej.
 
 ## Szablony i concepts
 
@@ -162,11 +162,27 @@ Preferuj `jthread`, RAII locks i prymitywy wysokiego poziomu. Data race to UB. `
 
 `<algorithm>`, `<array>`, `<atomic>`, `<chrono>`, `<concepts>`, `<filesystem>`, `<functional>`, `<memory>`, `<mutex>`, `<optional>`, `<ranges>`, `<span>`, `<string>`, `<string_view>`, `<thread>`, `<tuple>`, `<type_traits>`, `<unordered_map>`, `<utility>`, `<variant>`, `<vector>`.
 
-## Powiązane tematy
+## Pułapki, które trzeba umieć wyjaśnić
 
-- [Słownik](slownik.md)
-- [Dalsza nauka](dalsza_nauka.md)
-- [Źródła](zrodla.md)
+| Zapis lub sytuacja | Właściwy wniosek |
+|---|---|
+| `std::move(x)` | Rzutowanie do xvalue; wybór rzeczywistej kopii lub ruchu następuje później. |
+| `std::move(const_object)` | Zachowuje `const`, więc często kończy się kopią. |
+| `auto x = object` / `auto& x = object` | Wartość / alias; znak `&` zmienia zależność od oryginału. |
+| `decltype(x)` / `decltype((x))` | Dla nazwy obiektu pierwszy może dać zadeklarowany typ, drugi uwzględnia kategorię wyrażenia. |
+| `vector.reserve(n)` | Rezerwuje pojemność, ale nie tworzy `n` elementów. |
+| `map[key]` | Może wstawić nowy element; do samego szukania użyj `find` lub `contains`. |
+| `string_view` albo `span` | Widok nie przedłuża automatycznie życia danych. |
+| `shared_ptr<T>` | Licznik własności nie synchronizuje dowolnych operacji na `T`. |
+| `const`, `constexpr`, `constinit`, `consteval` | Cztery różne kontrakty; nie są zamiennikami „stałej”. |
+| `noexcept` | Wyjątek opuszczający funkcję prowadzi do `terminate`; nie oznacza braku UB lub kodów błędu. |
+| `if constexpr(false)` | Nie jest uniwersalnym sposobem ukrycia błędnego kodu poza szablonem. |
+| `co_await` | Może zawiesić wykonanie; nie tworzy automatycznie wątku. |
+| `relaxed` | Zapewnia właściwości operacji atomowej, ale nie publikuje automatycznie sąsiednich zwykłych danych. |
+| `while (!stream.eof())` | Zwykle niewłaściwy warunek odczytu; sprawdzaj wynik samej operacji. |
+| Poprawne `-fsyntax-only` | Potwierdza kompilowalność, nie linkowanie, wykonanie ani zgodność ABI. |
+
+Do każdego wiersza znajdziesz pełne wyjaśnienie w rozdziałach i [katalogu 150 mechanizmów](150-zaawansowanych-mechanizmow-cpp.md). Rozwiązuj ćwiczenia w odpowiednich rozdziałach, zanim uznasz skrót za opanowany.
 
 ## Ściąga decyzyjna
 
@@ -184,3 +200,8 @@ optymalizacja          -> najpierw profil i reprezentatywny benchmark
 
 Przy każdym skrócie sprawdź cztery pytania: kto posiada dane, co invaliduje dostęp, jak raportowana jest porażka i czy typ koduje jednostkę lub stan. Jeśli odpowiedź znajduje się wyłącznie w komentarzu, rozważ silniejszy typ albo mniejszy interfejs.
 
+## Powiązane tematy
+
+- [Słownik](slownik.md)
+- [Dalsza nauka](dalsza_nauka.md)
+- [Źródła](zrodla.md)

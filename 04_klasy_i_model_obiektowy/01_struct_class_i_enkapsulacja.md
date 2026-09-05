@@ -32,45 +32,78 @@ int main() {
 
 Prywatne pole nie jest celem samym w sobie. Enkapsulacja pozwala utrzymać inwariant i zmieniać reprezentację bez zmiany publicznego kontraktu. Konstruktor weryfikuje zakres, a metoda `value()` gwarantuje odczyt poprawnej wartości. `explicit` blokuje przypadkową konwersję z `int`.
 
-Metoda z końcowym `const` obiecuje, że nie zmieni obserwowalnego stanu przez `this`. Nie oznacza automatycznej thread safety. Element `mutable` może być modyfikowany w metodzie const, co jest użyteczne dla cache lub mutexa, ale nie powinno służyć omijaniu projektu typu.
+Metoda z końcowym `const` ogranicza modyfikację niestatycznych pól przez `this`; logiczna niezmienność jest dodatkowym kontraktem projektu. Nie oznacza automatycznej thread safety. Element `mutable` może być modyfikowany w metodzie const, co jest użyteczne dla cache lub mutexa, ale nie powinno służyć omijaniu projektu typu.
 
 Publiczne pola są rozsądne w pasywnym agregacie, który nie ma ukrytego inwariantu. Mechaniczne gettery i settery dla każdego pola nie zapewniają znaczącej enkapsulacji. Projektuj operacje domenowe, które utrzymują poprawny stan.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „struct, class i enkapsulacja”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Klasa definiuje reprezentację i zbiór operacji, które wolno wykonywać na obiekcie. W przykładzie `Percentage` wejściowy `int` jest najpierw używany do inicjalizacji pola. Następnie konstruktor sprawdza zakres. Jeżeli wartość jest niepoprawna, wyjątek uniemożliwia ukończenie konstrukcji. Wywołujący nie otrzymuje więc poprawnie skonstruowanego `Percentage` z wartością spoza dopuszczalnego przedziału.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Po pomyślnej konstrukcji metoda `value()` jedynie odczytuje pole. Nie ma metody zwracającej modyfikowalne `int&`, dzięki której odbiorca mógłby ominąć kontrolę. Samo oznaczenie pola jako `private` nie wystarczyłoby, gdyby publiczny getter oddawał nieograniczony zapis do tego pola. Enkapsulację ocenia się po możliwościach całego interfejsu.
+
+`explicit` zapobiega użyciu konstruktora jako przypadkowej konwersji niejawnej. `Percentage{75}` jasno sygnalizuje stworzenie nowego rodzaju wartości, a funkcja oczekująca `Percentage` nie przyjmie po prostu dowolnego `int` przez taką konwersję. Jest to szczególnie użyteczne, kiedy kilka liczb ma to samo przedstawienie, lecz inne znaczenie, na przykład procent, indeks i identyfikator.
 
 ## Pogłębienie mechanizmu
 
-- `struct` i `class` różnią się domyślnym dostępem oraz trybem dziedziczenia, nie możliwościami języka. Enkapsulacja ma chronić inwariant; gettery i settery kopiujące wszystkie pola nie tworzą użytecznej abstrakcji.
+Kontrola dostępu działa podczas kompilacji i dotyczy deklaracji. Metoda klasy może odczytywać prywatne pola innego obiektu tej samej klasy; `private` nie oznacza „dostępne wyłącznie przez ten konkretny egzemplarz”. Przyjaźń `friend` udostępnia wybranej funkcji lub klasie dostęp do reprezentacji. Nie jest automatycznie wzajemna, dziedziczona ani przechodnia. Może służyć dobrze kontrolowanej współpracy, na przykład implementacji operatora porównania.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „struct, class i enkapsulacja” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Metoda z końcowym `const` otrzymuje dostęp przez `this` do stałego obiektu i nie może zwyczajnie zmieniać jego niestatycznych pól, poza `mutable`. To reguła typów, a nie dowód braku skutków ubocznych: metoda może modyfikować zmienną globalną lub obiekt wskazywany przez pole wskaźnikowe. Logiczna stałość oznacza silniejszą umowę, którą projektant powinien utrzymywać. Cache w `mutable` powinien zachowywać obserwowalne wyniki i uwzględniać synchronizację.
+
+Agregat umożliwia inicjalizację swoich elementów bez wywoływania zwykłego konstruktora użytkownika. W C++23 ograniczenia agregatu obejmują między innymi brak konstruktorów deklarowanych przez użytkownika, brak prywatnych i chronionych bezpośrednich pól oraz brak funkcji wirtualnych. Samo słowo `struct` nie gwarantuje agregatowości. Dopisanie `Point() = default` jako deklaracji konstruktora może odebrać ten status.
+
+Designated initializers od C++20 pozwalają zapisać `Point{.x = 1, .y = 2}` dla odpowiedniego agregatu. W C++ oznaczenia muszą odpowiadać kolejności deklaracji pól; nie jest to dowolne przestawianie nazw znane z niektórych innych języków. Pominięte pola są inicjalizowane według reguł agregatu i ewentualnych inicjalizatorów domyślnych.
+
+Prywatność nie ukrywa fizycznej reprezentacji przed kompilacją klienta, jeżeli definicja klasy znajduje się w publicznym nagłówku. Dodanie pola może zmienić rozmiar i ABI. Jeśli wymagane jest oddzielenie reprezentacji binarnej, potrzebna jest dodatkowa technika, na przykład PImpl. To inne wymaganie niż kontrola dozwolonych operacji w kodzie źródłowym.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Operacja domenowa chroni zależność między wartościami lepiej niż dwa niezależne settery. Przedział nigdy nie zmienia granic w taki sposób, który pozostawia go odwróconym.
 
-~~~text
-Temat: struct, class i enkapsulacja
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <stdexcept>
+
+class Interval {
+    int low_;
+    int high_;
+public:
+    Interval(int low, int high) : low_{low}, high_{high} {
+        if (low > high) throw std::invalid_argument{"reversed interval"};
+    }
+    bool contains(int value) const noexcept {
+        return low_ <= value && value <= high_;
+    }
+    void replace(int low, int high) {
+        if (low > high) throw std::invalid_argument{"reversed interval"};
+        low_ = low;
+        high_ = high;
+    }
+};
+
+int main() {
+    Interval interval{2, 8};
+    try {
+        interval.replace(10, 3);
+    } catch (const std::invalid_argument&) {
+        assert(interval.contains(5));
+    }
+    interval.replace(4, 6);
+    assert(!interval.contains(3));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Sprawdzenie obu nowych granic następuje przed pierwszą zmianą. Ponieważ przypisania `int` nie rzucają, nieudana operacja pozostawia poprzedni przedział. Gdyby pola były bardziej złożonymi typami, należałoby ponownie przeanalizować możliwość wyjątku między przypisaniami.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „struct, class i enkapsulacja”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj agregat z publicznymi polami dla niezależnych danych o prostym znaczeniu. Wybieraj klasę chroniącą reprezentację, gdy poprawność wymaga zależności między polami lub kontrolowanych przejść stanu. Nazwij operację zgodnie z działaniem użytkownika, zamiast automatycznie generować getter i setter dla każdej składowej.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `class` ze wszystkimi polami publicznymi jest zawsze lepiej enkapsulowany niż `struct` z prywatnymi polami i kontrolowanymi metodami?
+
+**Odpowiedź.** Nie. Po jawnej deklaracji poziomów dostępu oba słowa dają te same możliwości. O ochronie inwariantu decydują dozwolone operacje, a nie domyślny dostęp wybranego słowa kluczowego.
+
+Źródła: [kontrola dostępu](https://timsong-cpp.github.io/cppwp/n4950/class.access), [agregaty](https://timsong-cpp.github.io/cppwp/n4950/dcl.init.aggr), [przyjaźń](https://timsong-cpp.github.io/cppwp/n4950/class.friend).
 
 ## Powiązane tematy
 

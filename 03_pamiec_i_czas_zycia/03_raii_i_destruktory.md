@@ -41,43 +41,67 @@ Konstruktor nie może zwrócić błędu zwykłą wartością. Jeśli nie potrafi
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „RAII i destruktory”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Strażnik RAII nabywa odpowiedzialność w konstruktorze i zachowuje ją tak długo, jak istnieje. W pierwszym programie udana konstrukcja `CounterGuard` zwiększa licznik. Po opuszczeniu bloku destruktor zmniejsza ten sam licznik, ponieważ pole referencyjne nadal wskazuje `active`. Obiekt `active` zadeklarowano wcześniej, więc żyje wystarczająco długo, aby destruktor strażnika mógł go zmienić.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Usunięcie kopiowania jest częścią poprawności przykładu. Gdyby domyślna kopia skopiowała referencję bez ponownego zwiększenia licznika, dwa destruktory wykonałyby dwa zmniejszenia po jednym nabyciu. Właściciel zasobu nie może przypadkiem powielać odpowiedzialności. Jeśli strażnik ma być przenoszalny, operacja ruchu musi przekazać obowiązek sprzątania i rozbroić źródło. Samo skopiowanie adresu w dwóch właścicielach nie wystarcza.
+
+Przy wyjątku niszczone są w odwrotnej kolejności lokalne obiekty, których konstrukcja zakończyła się poprawnie, o ile następuje rozwijanie stosu. Najnowsza blokada może zostać zwolniona przed wcześniejszym buforem i plikiem. Kod sprzątający nie musi znać miejsca, z którego przyszedł wyjątek. Zależności między zasobami powinny być odzwierciedlone kolejnością ich nabywania.
 
 ## Pogłębienie mechanizmu
 
-- RAII wiąże zwolnienie zasobu z destruktorem obiektu posiadającego. Podczas stack unwinding niszczone są w pełni skonstruowane podobiekty, dlatego częściowo nieudany konstruktor nie wymaga ręcznego odwijania wcześniej utworzonych członów.
+Jeśli konstruktor nie dokończy działania, destruktor całego obiektu nie zostanie wywołany. Dokończone pola i bazy są jednak niszczone. Dlatego zasób nabyty w konstruktorze powinien natychmiast otrzymać własnego właściciela RAII, na przykład pole `unique_ptr`, zanim następna operacja może rzucić. Trzymanie go w surowym wskaźniku do końca konstruktora tworzy lukę w ochronie.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „RAII i destruktory” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Destruktor zwykle ma niezgłaszający specyfikator wyjątków wyprowadzony z destruktorów baz i pól. Jawne `noexcept` dokumentuje ten kontrakt. Jeżeli operacja zwalniania może zawieść, potrzebna jest polityka: osobna metoda `close` lub `commit` raportuje błąd wtedy, gdy wywołujący może zareagować, a destruktor wykonuje bezpieczne sprzątanie końcowe. Ciche ignorowanie błędu zapisu pliku w destruktorze nie gwarantuje, że dane zostały utrwalone.
+
+RAII nie oznacza automatycznie cofnięcia wszystkich zmian. Zamknięcie pliku zwalnia uchwyt, ale nie usuwa wcześniej zapisanych bajtów. Silna gwarancja wyjątków wymaga, aby niepowodzenie nie zmieniało obserwowalnego stanu operacji. Można ją budować przez przygotowanie nowej wartości osobno i bezpieczne zatwierdzenie. RAII dostarcza sprzątania częściowo przygotowanego stanu, nie wymyśla transakcji za projektanta.
+
+Nie każdy sposób zakończenia programu rozwija stos. `std::abort`, zakończenie procesu przez system oraz część ścieżek kończących się `std::terminate` nie dają zwykłej gwarancji zniszczenia wszystkich obiektów lokalnych. Także `std::exit` nie niszczy automatycznych obiektów aktywnych funkcji. Krytyczna trwałość danych wymaga odpowiedniego protokołu zapisu, a nie założenia, że każdy destruktor zawsze się wykona.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Dwa strażniki ustawiają tymczasowe wartości tej samej zmiennej. Wyjątek opuszcza ich zakres, a odwrotna kolejność destrukcji przywraca najpierw wartość pośrednią i na końcu pierwotną.
 
-~~~text
-Temat: RAII i destruktory
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <stdexcept>
+
+class RestoreInt {
+    int& target_;
+    int previous_;
+public:
+    RestoreInt(int& target, int next) noexcept
+        : target_{target}, previous_{target} { target_ = next; }
+    ~RestoreInt() noexcept { target_ = previous_; }
+    RestoreInt(const RestoreInt&) = delete;
+    RestoreInt& operator=(const RestoreInt&) = delete;
+};
+
+int main() {
+    int mode = 1;
+    try {
+        RestoreInt outer{mode, 2};
+        RestoreInt inner{mode, 3};
+        assert(mode == 3);
+        throw std::runtime_error{"operation failed"};
+    } catch (const std::runtime_error&) {
+        assert(mode == 1);
+    }
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Przypisanie `int` nie rzuca, więc sprzątanie rzeczywiście spełnia `noexcept`. Uogólnienie strażnika na dowolne `T` wymaga ponownej analizy: przywracające przypisanie dla takiego typu mogłoby samo rzucać. Prosty przykład nie jest automatycznie poprawnym uniwersalnym mechanizmem transakcyjnym.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „RAII i destruktory”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Nazwij lokalny obiekt blokady lub strażnika. Wyrażenie tworzące tylko temporary, na przykład `Guard{resource};`, niszczy strażnika już przy kończącym je średniku. Kolejne instrukcje nie są chronione, mimo że konstruktor poprawnie nabył zasób. Deklaracja `Guard guard{resource};` wiąże odpowiedzialność z całym zakresem nazwanego obiektu. Czas życia strażnika jest więc równie istotny jak poprawność jego destruktora.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Preferuj istniejących właścicieli: `unique_ptr` dla obiektu, `lock_guard` dla blokady i klasy strumieni dla plików. Własny strażnik ma sens, gdy zasób lub przywracany stan nie ma odpowiednika bibliotecznego. Jego interfejs powinien jasno określać kopiowanie, przenoszenie, możliwość zwolnienia odpowiedzialności oraz wymagany czas życia obserwowanych obiektów.
 
-## Pułapki
+**Ćwiczenie.** Konstruktor klasy najpierw otwiera zasób i zapisuje surowy uchwyt, a potem tworzy napis, którego alokacja rzuca. Czy destruktor tej klasy zamknie uchwyt?
 
-RAII nie oznacza, że każdy destruktor może zakładać pełne istnienie innych globalnych obiektów. Uważaj też na cykle `shared_ptr`. Jeśli zasób ma dedykowany typ standardowy, użyj go zamiast pisać własną otoczkę.
+**Odpowiedź.** Nie, bo konstrukcja klasy nie została ukończona. Zasób musi już należeć do skonstruowanego pola RAII lub lokalnego strażnika. Wtedy jego własny destruktor wykona sprzątanie podczas obsługi niepowodzenia konstruktora.
+
+Źródła: [destruktory](https://timsong-cpp.github.io/cppwp/n4950/class.dtor), [obsługa wyjątków w konstrukcji](https://timsong-cpp.github.io/cppwp/n4950/except.ctor), [zakończenie przez terminate](https://timsong-cpp.github.io/cppwp/n4950/except.terminate).
 
 ## Powiązane tematy
 

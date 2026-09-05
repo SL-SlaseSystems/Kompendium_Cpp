@@ -34,39 +34,64 @@ Surowy wskaźnik uzyskany przez `.get()` jest niewłaścicielski. Nie wolno twor
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Smart pointery”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+`make_unique<T>` konstruuje dynamiczny obiekt i oddaje pojedynczy przenoszalny uchwyt. Destruktor `unique_ptr` uruchamia jego deleter, jeśli posiada zasób. `reset` zastępuje posiadany obiekt i sprząta poprzedni, natomiast `release` oddaje surowy wskaźnik bez zwalniania. Po `release` odpowiedzialność musi przejąć konkretny odbiorca; zignorowanie wyniku zwykle tworzy wyciek.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W przykładzie z `shared_ptr` pierwszy właściciel tworzy grupę współwłasności. Skopiowanie właściciela zwiększyłoby liczbę silnych odniesień. Utworzenie `weak_ptr` zachowuje możliwość sprawdzenia grupy, lecz nie utrzymuje obiektu. `lock` próbuje uzyskać nowy silny uchwyt. Gdy się powiedzie, obiekt pozostaje żywy przez czas tego lokalnego uchwytu, nawet jeśli inni właściciele w międzyczasie zrezygnują.
+
+Kiedy znika ostatni silny właściciel, niszczony jest zarządzany obiekt. Blok kontrolny może przetrwać do zaniku słabych odniesień. Są więc dwa odrębne czasy życia. Przy połączonej alokacji `make_shared` destruktor obiektu wykona się odpowiednio wcześnie, ale cały przydzielony blok może zostać zwolniony dopiero później. Ma to znaczenie dla dużych obiektów długo obserwowanych przez `weak_ptr`.
 
 ## Pogłębienie mechanizmu
 
-- `unique_ptr` koduje wyłączną własność i ma mały koszt, `shared_ptr` utrzymuje współdzielony control block, a `weak_ptr` obserwuje bez tworzenia cyklu. Wybór wynika z grafu własności, nie z chęci uniknięcia jawnej decyzji.
+Tożsamość grupy własności nie jest tym samym co przechowywany adres. Konstruktor aliasujący `shared_ptr` pozwala współdzielić własność większego obiektu, jednocześnie wskazując jego pole. Taki wskaźnik jest poprawny, dopóki wskazywany podobiekt pozostaje ważny w czasie życia właściciela. Aliasing nie unieruchamia elementu wektora, który może później zostać przeniesiony przez realokację.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Smart pointery” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Zbudowanie `shared_ptr<T>{existing.get()}` tworzy nowy blok kontrolny. Oba niezależne bloki będą uważać się za właściciela tego samego adresu, co może skończyć się podwójnym usunięciem. Do współdzielenia używaj kopii istniejącego `shared_ptr` lub jego rzutowań bibliotecznych. `enable_shared_from_this` pozwala obiektowi uzyskać udział w już istniejącej grupie, ale wymaga poprawnie ustanowionej współwłasności; użycie zbyt wcześnie w konstruktorze jej nie zapewnia.
+
+`weak_ptr::expired()` jest tylko obserwacją chwili. Sekwencja „sprawdź, a potem uzyskaj surowy dostęp” nie zabezpiecza życia przed konkurencyjnym zniknięciem właścicieli. `lock()` łączy próbę wzmocnienia z uzyskaniem uchwytu. Również `use_count() == 1` nie jest ogólnym protokołem bezpiecznej wyłącznej modyfikacji współdzielonych danych.
+
+Niezależne instancje `shared_ptr` mogą być bezpiecznie kopiowane i niszczone równolegle, współdzieląc blok kontrolny. Modyfikacja tej samej instancji uchwytu z wielu wątków wymaga synchronizacji albo `std::atomic<std::shared_ptr<T>>` od C++20. Dostęp do obiektu `T` pozostaje osobnym problemem; licznik własności nie blokuje jego pól.
+
+Cykl właścicielski utrzymuje dodatnie liczniki mimo braku dostępu z zewnątrz. W drzewie dzieci mogą posiadać kolejne dzieci, a odnośnik do rodzica zwykle powinien być obserwacją. Dobór `weak_ptr` wynika z kierunku odpowiedzialności, a nie z chęci losowego przerwania dowolnej krawędzi grafu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Aliasujący właściciel wskazuje pole, ale utrzymuje cały obiekt. Dzięki temu lokalna rezygnacja z głównego uchwytu nie unieważnia odczytu imienia.
 
-~~~text
-Temat: Smart pointery
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <memory>
+#include <string>
+
+struct Profile {
+    std::string name;
+    int age;
+};
+
+int main() {
+    auto profile = std::make_shared<Profile>(Profile{"Ada", 36});
+    std::weak_ptr<Profile> observer = profile;
+    std::shared_ptr<std::string> name{profile, &profile->name};
+    profile.reset();
+    assert(!observer.expired());
+    assert(*name == "Ada");
+    name.reset();
+    assert(observer.expired());
+    assert(!observer.lock());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`name` nie usuwa samodzielnie pola `std::string`. Współdzieli blok kontrolny, którego operacja sprzątania dotyczy `Profile`. Wskaźnik do pola i zarządzany zasób są powiązane umową konstruktora aliasującego, choć mają różne typy i mogą mieć różne adresy.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Smart pointery”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Typ deletera należy do typu `unique_ptr`, a stanowy deleter może zwiększać rozmiar uchwytu. Pozwala to obsługiwać zasoby wymagające własnej funkcji zwalniającej, na przykład obiekt biblioteki C. Nie zakładaj, że każdy `unique_ptr` ma zawsze rozmiar jednego wskaźnika. Ta częsta optymalizacja dla pustego deletera jest właściwością konkretnej reprezentacji, nie uniwersalnym kontraktem interfejsu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Przekazuj `unique_ptr` przez wartość, gdy funkcja przejmuje wyłączną własność. Przekazuj `shared_ptr` przez wartość, gdy ma zachować własny udział. Dla samego odczytu lub modyfikacji obiektu używaj `const T&`, `T&` lub wskaźnika, zależnie od nullowalności. Wymuszanie smart pointera na odbiorcy, który nie zarządza życiem, niepotrzebnie wiąże interfejs z konkretnym modelem alokacji.
+
+**Ćwiczenie.** Czy `std::move(shared)` jest potrzebne, aby przekazać funkcji kolejnego współwłaściciela i zachować dotychczasowy uchwyt?
+
+**Odpowiedź.** Nie. Kopia tworzy dodatkowy udział i zachowuje źródło. Ruch przekazuje istniejący uchwyt, pozostawiając źródło puste. Obie operacje mogą mieć tę samą wartość adresu u odbiorcy, ale wyrażają inne wymagania wobec nadawcy.
+
+Źródła: [unique_ptr](https://timsong-cpp.github.io/cppwp/n4950/unique.ptr), [shared_ptr](https://timsong-cpp.github.io/cppwp/n4950/util.smartptr.shared), [obserwacja weak_ptr](https://timsong-cpp.github.io/cppwp/n4950/util.smartptr.weak.obs).
 
 ## Powiązane tematy
 

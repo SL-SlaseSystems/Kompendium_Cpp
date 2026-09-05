@@ -37,39 +37,64 @@ Nie wolno ogólnie specjalizować szablonów w namespace `std`. Standard dopuszc
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Specialization i SFINAE”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zebranie argumentów, dedukcję parametrów, sprawdzenie ograniczeń, wybór specjalizacji i instancjację użytej postaci. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd substytucji, niespełnione constraint i błąd wewnątrz już wybranej instancji. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wydedukowane typy, zbiór kandydatów, spełnione constraints oraz minimalną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Dla `Category<int*>` najpierw identyfikowany jest szablon główny, a następnie sprawdzane pasujące specjalizacje częściowe. Wzorzec `Category<T*>` pasuje z `T = int` i jest bardziej szczegółowy niż ogólna wersja, więc dostarcza definicję klasy. Specjalizacja nie dziedziczy automatycznie brakujących pól i metod szablonu głównego; stanowi własną definicję wymagającą zachowania oczekiwanego interfejsu.
 
-Model dla tej części kompendium jest następujący: Szablon jest przepisem na deklaracje zależne od argumentów, a nie kodem wykonywanym w runtime. Dedukcja, lookup, ograniczenia i instancjacja zachodzą w różnych momentach; pomieszanie tych faz prowadzi do trudnych diagnostyk. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy `twice(4)` dedukcja daje `T = int`. `enable_if_t<true, int>` oznacza `int`, więc deklaracja funkcji pozostaje poprawna. Dla argumentu `double` warunek jest fałszywy i alias nie dostarcza typu. Jeżeli błąd powstaje we właściwym bezpośrednim kontekście podstawienia, kandydat znika ze zbioru. Gdy nie zostaje inne wykonalne przeciążenie, całe wywołanie nadal jest błędne; SFINAE nie gwarantuje, że zawsze istnieje plan awaryjny.
+
+Błąd z wnętrza ciała wybranej funkcji zwykle jest już zwykłym błędem instancjacji. Szablon `void f(T value) { value.missing(); }` nie zostaje bezpiecznie pominięty tylko dlatego, że dla `int` nie istnieje `missing`. Żądane wyrażenie trzeba przenieść do sprawdzanego interfejsu, na przykład requires-expression, jeśli ma decydować o dostępności przeciążenia.
 
 ## Pogłębienie mechanizmu
 
-- SFINAE usuwa kandydata tylko wtedy, gdy błąd powstaje w bezpośrednim kontekście substytucji. Partial specialization dotyczy szablonów klas i zmiennych; funkcje zamiast tego wykorzystują przeciążanie.
+Bezpośredni kontekst jest ograniczony. Substytucja może uruchomić instancjację innego szablonu klasy, a błąd wewnątrz tej klasy nie musi należeć do chronionego kontekstu. Zagnieżdżanie pomocniczych traits nie zmienia automatycznie każdego twardego błędu w łagodne odrzucenie. Kolejność podstawiania również może mieć znaczenie, dlatego układ deklaracji powinien być prosty i spójny.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Specialization i SFINAE” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`std::void_t<...>` zamienia poprawne argumenty typowe na `void`. Gdy któregoś argumentu nie da się utworzyć, odpowiednia specjalizacja częściowa traits może przestać pasować. Wersja główna dostarcza wtedy wynik fałszywy. `std::declval<T>()` pozwala formułować wyrażenia bez konstruowania `T`, lecz wolno go używać w kontekstach nieewaluowanych, takich jak `decltype`, nie jako rzeczywistej fabryki obiektu.
+
+Pełna specjalizacja funkcji nie uczestniczy w rozstrzyganiu tak jak zwykłe niezależne przeciążenie. Najpierw wybierany jest właściwy szablon funkcji, a potem może zostać użyta jego specjalizacja. Dodanie przeciążenia o innym wzorcu może zmienić, który szablon w ogóle zostanie wybrany. Dla funkcji zazwyczaj czytelniej jest przeciążyć interfejs lub użyć constraints zamiast budować rozbudowaną sieć pełnych specjalizacji.
+
+Specjalizacja jawna powinna być zadeklarowana, zanim użycie spowoduje odpowiednią niejawną instancjację w każdej jednostce translacji, w której jest potrzebna. Umieszczenie jej przypadkiem za pierwszym wywołaniem nie jest sposobem na późniejsze podmienienie już wybranego zachowania. Rozmieszczenie specjalizacji w nagłówkach należy analizować również pod kątem ODR.
+
+Nie należy rozróżniać dwóch szablonów funkcji wyłącznie domyślnymi argumentami parametru szablonu. Dwie wersje `template<class T, class = enable_if_t<...>>` mogą być redeklaracjami tego samego szablonu, mimo innego warunku. Constraints od C++20 lepiej wyrażają takie alternatywy i zwykle dają krótszą diagnostykę.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Trait wykrywa możliwość wywołania `size()` na stałym obiekcie. Pytanie dotyczy konkretnego wyrażenia i kwalifikacji, a nie tylko istnienia nazwy o takim brzmieniu.
 
-~~~text
-Temat: Specialization i SFINAE
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+template<class T, class = void>
+struct HasConstSize : std::false_type {};
+
+template<class T>
+struct HasConstSize<T, std::void_t<decltype(std::declval<const T&>().size())>>
+    : std::true_type {};
+
+struct MutableOnly {
+    int size() { return 1; }
+};
+
+int main() {
+    static_assert(HasConstSize<std::string>::value);
+    static_assert(HasConstSize<std::vector<int>>::value);
+    static_assert(!HasConstSize<int>::value);
+    static_assert(!HasConstSize<MutableOnly>::value);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`MutableOnly` ma metodę `size`, ale nie można jej wywołać na `const T&`, dlatego trait zwraca fałsz. Gdyby algorytm potrzebował również konkretnego typu wyniku lub niezgłaszania wyjątków, te własności należałoby sprawdzić osobno. Sama nazwa trait nie ustanawia dodatkowych wymagań.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Specialization i SFINAE”, oceniaj czytelny kontrakt, krótka diagnostyka, ograniczona liczba instancji i brak metaprogramowania bez wartości dla użytkownika API. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+W nowym kodzie C++23 używaj concepts do opisywania dostępności operacji, a `if constexpr` do wyboru implementacji wewnątrz poprawnego kontraktu. SFINAE jest potrzebne przy czytaniu starszych bibliotek i rozwijaniu kodu obsługującego wcześniejsze standardy. Specjalizacja częściowa pozostaje naturalna dla transformacji typów i różnych reprezentacji klas, także w nowoczesnym C++.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy brak metody w ciele funkcji z dedukowanym zwracanym `auto` zawsze zostanie potraktowany jako SFINAE?
+
+**Odpowiedź.** Nie. Ustalenie wyniku może wymagać instancjacji ciała, a jej błąd jest zwykle twardym błędem. Jeśli dostępność ma zależeć od wyrażenia, umieść warunek w requires lub odpowiednim bezpośrednim kontekście deklaracji, zamiast liczyć na ochronę całej implementacji.
+
+Źródła: [reguły substytucji](https://timsong-cpp.github.io/cppwp/n4950/temp.deduct.general), [specjalizacje częściowe](https://timsong-cpp.github.io/cppwp/n4950/temp.spec.partial), [specjalizacje jawne](https://timsong-cpp.github.io/cppwp/n4950/temp.expl.spec).
 
 ## Powiązane tematy
 

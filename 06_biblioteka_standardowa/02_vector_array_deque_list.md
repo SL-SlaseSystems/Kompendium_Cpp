@@ -37,43 +37,60 @@ Zacznij od `vector`. Wybierz `array`, gdy rozmiar jest compile-time i wartość 
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „vector, array, deque i list”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie zakresu, wykonanie operacji zgodnie z wymaganiami iteratora i aktualizację stanu kontenera wraz z regułami invalidacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij właściciela elementów od widoku, kolejność logiczną od fizycznego układu i gwarancję złożoności od konkretnego czasu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź rozmiar i capacity, ważność iteratorów, liczbę alokacji, kolejność elementów oraz klasę złożoności. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Początkowy wektor zawiera trzy skonstruowane liczby. `reserve(8)` zapewnia miejsce na co najmniej osiem elementów; jeśli dotychczasowy bufor jest za mały, następują alokacja, konstrukcja elementów w nowym miejscu i zwolnienie starej pamięci. Nie wolno odczytywać `values[7]`, ponieważ rozmiar nadal wynosi trzy. Dopiero `push_back(4)` konstruuje czwarty element i zwiększa rozmiar. Posortowanie zmienia wartości na pozycjach, nie rozmiar ani pojemność.
 
-Model dla tej części kompendium jest następujący: Kontenery i algorytmy biblioteki standardowej mają kontrakty dotyczące złożoności, invalidacji, własności oraz zakresów. Poprawny wybór wynika z wymaganych operacji i stabilności adresów, nie z przyzwyczajenia do jednego kontenera. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Amortyzowane O(1) dla dodawania na koniec oznacza koszt uśredniony nad sekwencją operacji. Pojedyncze dodanie może kosztować O(n), gdy wymaga realokacji. Standard nie nakazuje konkretnego współczynnika wzrostu pojemności. Wywoływanie `reserve(size()+1)` przed każdym dodaniem może zniszczyć korzystny wzorzec wzrostu i spowodować kwadratową sumę przenosin. Rezerwuj raz na podstawie oszacowania całego zadania.
+
+`array` przechowuje dokładnie N elementów wewnątrz siebie, więc jego kopiowanie kopiuje elementy. Nie musi leżeć na stosie: może być polem obiektu zaalokowanego dynamicznie. `array<int, 0>` jest poprawnym pustym kontenerem, ale `front()` i `back()` nie stają się przez to dozwolone. Dostęp przez `at` sprawdza granicę i rzuca, podczas gdy `operator[]` wymaga prawidłowego indeksu.
 
 ## Pogłębienie mechanizmu
 
-- `vector` zapewnia ciągłość pamięci i dobrą lokalność, ale realokacja invaliduje wskaźniki oraz iteratory. `deque` segmentuje storage, `list` stabilizuje węzły kosztem lokalności, a `array` ma rozmiar w typie.
+`deque` gwarantuje dostęp losowy w stałym czasie, jednak nie ciągłość całego zakresu. Nie można przekazać adresu pierwszego elementu i rozmiaru do API oczekującego jednej tablicy. Wstawienie na którymkolwiek końcu unieważnia iteratory, ale pozostawia referencje do dotychczasowych elementów. Wstawienie w środku ma surowsze skutki. Ta różnica pokazuje, że iterator może przechowywać dodatkowy stan nawigacji, niezależny od adresu elementu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „vector, array, deque i list” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`list` gwarantuje stabilność iteratorów i referencji przy wstawianiu, a usunięcie unieważnia te odnoszące się do usuniętych elementów. `splice` przekazuje istniejące elementy pomiędzy listami bez kopiowania ich wartości. Warunki obejmują zgodność allocatorów; nie wolno zakładać, że dowolne dwa zasobniki pamięci są wymienne. Złożoność zależy od przeciążenia: przeniesienie pojedynczego elementu jest stałe, a przekazanie zakresu między różnymi listami może wymagać jego policzenia.
+
+`emplace_back(args...)` konstruuje element z argumentów bez obowiązkowego zewnętrznego obiektu tymczasowego. Nie gwarantuje jednak braku realokacji ani braku przenoszenia wcześniejszych elementów. Gdy istnieje już wartość typu T, `push_back(std::move(value))` zwykle wyraża intencję wystarczająco jasno. Dla `vector<bool>` obowiązuje szczególna reprezentacja bitowa: wynik indeksowania jest obiektem pośredniczącym, więc nie traktuj go jak zwykłego `bool&`.
+
+`resize(n)` dla wektora liczb z domyślnym allocatorem tworzy brakujące elementy o wartości zero, a zmniejszenie rozmiaru niszczy końcowe elementy. Nie oznacza to obowiązkowego oddania pojemności systemowi. Dzięki temu późniejsza rozbudowa może wykorzystać istniejący bufor. Wywołanie `clear` także usuwa elementy, pozostawiając pojemność wektora; stare referencje do zniszczonych elementów nie odzyskują ważności tylko dlatego, że pamięć jeszcze pozostaje zaalokowana. Własność storage i czas życia poszczególnych T to różne warstwy.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Lista jest uzasadniona, gdy aplikacja już posiada pozycję elementu i chce zmienić jego przynależność do kolejki przy zachowaniu tożsamości.
 
-~~~text
-Temat: vector, array, deque i list
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <iterator>
+#include <list>
+#include <string>
+
+int main() {
+    std::list<std::string> waiting{"compile", "test", "package"};
+    std::list<std::string> running;
+    const auto job = std::next(waiting.begin());
+    const auto* address = &*job;
+
+    running.splice(running.end(), waiting, job);
+
+    assert(waiting.size() == 2 && running.size() == 1);
+    assert(*job == "test");
+    assert(&running.front() == address);
+    running.erase(job);
+    assert(running.empty());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Po `splice` iterator `job` nadal odnosi się do tego samego elementu, który należy już do `running`. Dlatego przekazujemy go do `running.erase`, a nie do `waiting.erase`. Po usunięciu nie wolno go dereferencjonować. Sam brak zmiany wartości nie tłumaczy poprawności: istotne jest zachowanie czasu życia i adresu obiektu podczas przekazania.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „vector, array, deque i list”, oceniaj wzorzec dostępu, lokalność danych, stabilność referencji, koszt modyfikacji i możliwość użycia gotowego algorytmu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Dla intensywnego przeglądania danych lokalność wektora często wygrywa ze stałym kosztem wstawiania listy. Jeśli potrzebujesz stabilnych adresów obiektów i zwartej tablicy uchwytów, rozważ `vector<unique_ptr<T>>`: realokacja przesuwa właścicieli, ale nie wskazywane obiekty. Płacisz wtedy za osobne alokacje i pośredni dostęp, co trzeba uwzględnić w pomiarze.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Kolejka usuwa pierwszy element i dodaje na końcu milion razy. Dlaczego `vector.erase(begin())` może być złym wyborem? **Odpowiedź:** każde usunięcie przesuwa pozostałe elementy, więc koszt rośnie z długością kolejki. `deque::pop_front` odpowiada temu wzorcowi; dla ograniczonej pojemności można również zaprojektować bufor cykliczny z jawnymi zasadami przepełnienia.
+
+Źródła reguł: [C++23: vector](https://timsong-cpp.github.io/cppwp/n4950/vector), [deque](https://timsong-cpp.github.io/cppwp/n4950/deque), [list i splice](https://timsong-cpp.github.io/cppwp/n4950/list.ops).
 
 ## Powiązane tematy
 
 - [Iteratory i invalidacja](04_iteratory_i_invalidacja.md)
 - [Dynamiczna pamięć](../03_pamiec_i_czas_zycia/02_stos_sterta_i_dynamiczna_pamiec.md)
 - [Wydajność i cache](../13_wzorce_api_i_wydajnosc/05_wydajnosc_cache_i_zero_overhead.md)
-

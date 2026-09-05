@@ -31,43 +31,62 @@ Lifetime obiektu klasy zaczyna się po uzyskaniu odpowiednio wyrównanej pamięc
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Storage duration i lifetime”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Dla zwykłego lokalnego obiektu klasy rozpatrz trzy etapy: dostępność miejsca, wykonanie inicjalizacji i późniejsze zniszczenie. Kompilator może zarezerwować miejsce wcześniej, ale nie daje to prawa do używania jeszcze nieskonstruowanego obiektu. Konstruktor buduje najpierw bazy i pola. Po ukończeniu inicjalizacji istnieje kompletny obiekt z ustanowionym inwariantem, a przy wyjściu z zakresu uruchamiany jest destruktor.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Formalne zakończenie lifetime obiektu klasy następuje już przy rozpoczęciu wywołania destruktora. Nie oznacza to, że ciało destruktora nie może korzystać z pól: okres konstrukcji i destrukcji ma specjalne reguły. Pola są niszczone dopiero po wykonaniu ciała destruktora, w odwrotnej kolejności do inicjalizacji. Uproszczenie „każdy dostęp po końcu lifetime jest zawsze taki sam” pomija te szczególne fazy.
+
+W pierwszym przykładzie nazwa `local_counter` jest widoczna tylko w funkcji, ale licznik nie powstaje na nowo przy każdym wejściu. Jego wartość jest zachowywana. Inicjalizacja lokalnego statyka z dynamicznym inicjalizatorem następuje przy pierwszym dojściu do deklaracji; jeśli rzuci wyjątek, kolejna próba wejścia może ją powtórzyć. Bezpieczeństwo tej inicjalizacji nie obejmuje późniejszego inkrementowania licznika.
 
 ## Pogłębienie mechanizmu
 
-- Storage duration opisuje dostępność pamięci, a lifetime istnienie konkretnego obiektu w tej pamięci. Ponowne użycie storage przez placement new może zakończyć jeden lifetime i rozpocząć drugi bez zmiany adresu.
+Obiekty tymczasowe zwykle są niszczone na końcu pełnego wyrażenia, najczęściej przy średniku. Lokalne związanie odpowiedniej referencji z temporary może przedłużyć jego życie. `const std::string& s = std::string{"abc"};` zachowuje napis do końca życia tej lokalnej referencji. Utworzenie następnej referencji z `s` nie przyznaje nowego, dłuższego okresu życia. Przedłużenie nie jest przekazywane jak własność.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Storage duration i lifetime” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Istnieją istotne wyjątki. Temporary związane z parametrem referencyjnym trwa do końca pełnego wyrażenia zawierającego wywołanie. Jeżeli funkcja zwróci ten alias i odbiorca zachowa go dłużej, powstanie dangling. Zwracanie referencji do lokalnego obiektu nie jest naprawiane przez `const` po stronie odbiorcy. Referencja jest opisem dostępu, a nie automatycznym właścicielem.
+
+Biblioteka może oddzielać zajęte miejsce od aktywnych obiektów. `vector::reserve` zwiększa pojemność bez tworzenia dodatkowych elementów, dlatego indeks mniejszy od `capacity()`, ale nie od `size()`, nadal nie wskazuje legalnego elementu do zwykłego użycia. `optional::reset` niszczy zawartą wartość, chociaż miejsce wewnątrz samego `optional` nadal istnieje.
+
+Ponowne użycie miejsca przez placement new wymaga odpowiedniego rozmiaru i wyrównania oraz prawidłowego zarządzania poprzednim obiektem. Reguły przezroczystego zastąpienia czasem pozwalają istniejącym nazwom i wskaźnikom odnosić się do następcy, lecz nie w każdym układzie podobiektów. Najbezpieczniej korzystać ze wskaźnika zwróconego przez operację konstrukcji; `std::launder` nie tworzy brakującego obiektu i nie legalizuje dowolnego rzutowania.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+`optional` pozwala pokazać koniec jednego życia i początek następnego bez ręcznego operowania na bajtach. Licznik mierzy aktywne obiekty, a nie liczbę istniejących miejsc na nie.
 
-~~~text
-Temat: Storage duration i lifetime
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <optional>
+
+struct Tracked {
+    static inline int alive = 0;
+    int value;
+    explicit Tracked(int number) : value{number} { ++alive; }
+    ~Tracked() { --alive; }
+    Tracked(const Tracked&) = delete;
+    Tracked& operator=(const Tracked&) = delete;
+};
+
+int main() {
+    std::optional<Tracked> slot;
+    assert(Tracked::alive == 0);
+    slot.emplace(7);
+    assert(slot->value == 7 && Tracked::alive == 1);
+    slot.reset();
+    assert(!slot && Tracked::alive == 0);
+    slot.emplace(9);
+    assert(slot->value == 9 && Tracked::alive == 1);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`reset` kończy życie pierwszego `Tracked`, ale nie niszczy `slot`. Kolejne `emplace` konstruuje nową wartość. Nie należy zakładać, że wcześniejszy obserwator automatycznie jest właściwym uchwytem do nowego stanu; kod po zmianie powinien ponownie uzyskać dostęp przez właściciela.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Storage duration i lifetime”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Projektuj długość życia od właściciela w stronę obserwatorów. Gdy zadanie musi zachować dane po powrocie z funkcji, potrzebuje własnej wartości lub jawnego udziału we własności. Wskaźnik do lokalnej zmiennej nie spełni tego wymagania, nawet jeśli test chwilowo odczytuje spod niego oczekiwane bajty. Sanitizery mogą wykrywać część naruszeń, lecz brak raportu nie dowodzi istnienia obiektu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy rezerwacja stu elementów przez `std::vector<int> v; v.reserve(100);` pozwala wykonać `v[0] = 5`?
 
-## Dobre praktyki
+**Odpowiedź.** Nie. Rozmiar nadal wynosi zero. Potrzebne jest utworzenie elementu, na przykład przez `push_back(5)` lub `resize`. Pojemność określa możliwość wzrostu bez realokacji, a nie aktualny zakres żywych elementów dostępnych przez interfejs kontenera.
 
-Ograniczaj zakres i czas życia. Preferuj lokalne obiekty wartościowe oraz function-local statics dla bezpiecznej inicjalizacji singletonów, jeśli są naprawdę potrzebne. Nie przechowuj referencji do obiektu krócej żyjącego niż właściciel referencji.
+Źródła: [czas życia obiektów](https://timsong-cpp.github.io/cppwp/n4950/basic.life), [obiekty tymczasowe](https://timsong-cpp.github.io/cppwp/n4950/class.temporary), [konstrukcja i destrukcja](https://timsong-cpp.github.io/cppwp/n4950/class.cdtor).
 
 ## Powiązane tematy
 

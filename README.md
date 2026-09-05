@@ -1,10 +1,12 @@
 # Kompendium języka C++
 
-Polskojęzyczny przewodnik po współczesnym C++: od pierwszego programu, przez czas życia obiektów, klasy, szablony i bibliotekę standardową, aż po model pamięci, ABI, lock-free i mechanikę korutyn. Bazą jest C++23. Materiał dotyczący C++26 jest oznaczony osobno. Kompendium obejmuje 73 rozdziały główne, 15 eksperckich i ponad 61 tysięcy słów prozy wraz z materiałami przekrojowymi.
+Polskojęzyczny przewodnik po współczesnym C++: od pierwszego programu, przez czas życia obiektów, klasy, szablony i bibliotekę standardową, aż po model pamięci, ABI, lock-free i mechanikę korutyn. Bazą jest C++23. Materiał dotyczący C++26 jest oznaczony osobno. Kompendium obejmuje 73 rozdziały główne, 15 eksperckich oraz katalog 150 zaawansowanych mechanizmów. Opisy łączą intuicję, precyzyjne reguły, analizę przykładów i ćwiczenia z odpowiedziami.
 
-Każdy rozdział przechodzi od podstawowego modelu do mechaniki języka. Sekcja „Jak to działa krok po kroku” rozdziela kompilację, linkowanie i runtime; „Pogłębienie mechanizmu” precyzuje reguły konkretnego tematu; „Drugi przykład” dodaje przypadek diagnostyczny, a „Porównanie i decyzje” pomaga wybrać rozwiązanie na podstawie ownership, lifetime, przenośności i zmierzonego kosztu.
+Każdy rozdział przechodzi od podstawowego modelu do mechaniki konkretnego zagadnienia. Sekcja „Jak to działa krok po kroku” śledzi rzeczywiste operacje, „Pogłębienie mechanizmu” precyzuje reguły i przypadki brzegowe, „Drugi przykład” pozwala je przećwiczyć, a „Porównanie i decyzje” pomaga dobrać rozwiązanie. Ćwiczenia zawierają odpowiedzi i uzasadnienia; linki do źródeł pozwalają sprawdzić regułę w odpowiedniej wersji standardu.
 
 ## Jak korzystać
+
+Do przekrojowej powtórki służy [150 zaawansowanych mechanizmów](150-zaawansowanych-mechanizmow-cpp.md); każda pozycja rozwija działanie, zastosowanie i pułapkę.
 
 - **Od zera:** czytaj kolejno katalogi `01`–`13`, a dopiero potem `zaawansowane`.
 - **Znasz inny język:** zacznij od podstaw, czasu życia, klas, szablonów i biblioteki standardowej; później wybierz interesujące działy.
@@ -14,7 +16,7 @@ Każdy rozdział przechodzi od podstawowego modelu do mechaniki języka. Sekcja 
 ## Oznaczenia przykładów
 
 - `cpp` — samowystarczalny fragment kompilowany przez walidator jako C++23;
-- `cpp,notest` — kod ilustracyjny, zależny od platformy, funkcji C++26 albo celowo niebezpieczny;
+- `cpp,notest` — kod ilustracyjny, celowo błędny albo wymagający osobnej konfiguracji, platformy, funkcji C++26 lub API niedostępnego w lokalnym toolchainie; przy takim przykładzie opisano powód;
 - `text` — pseudokod, polecenia lub fragment wymagający większego projektu.
 
 Kompilowalność nie oznacza automatycznie poprawności projektu ani braku undefined behavior. Rozdziały wyjaśniają wymagane kontrakty i czas życia danych.
@@ -153,6 +155,7 @@ Osobna [mapa działu zaawansowanego](zaawansowane/README.md) podaje wymagania ws
 
 ## Materiały przekrojowe
 
+- [150 zaawansowanych mechanizmów C++](150-zaawansowanych-mechanizmow-cpp.md)
 - [Słownik polsko-angielski](slownik.md)
 - [Ściąga składni i biblioteki](sciaga.md)
 - [Dalsza nauka i specjalizacje](dalsza_nauka.md)

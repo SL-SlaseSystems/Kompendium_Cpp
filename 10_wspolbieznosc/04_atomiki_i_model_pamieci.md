@@ -36,39 +36,62 @@ Atomic nie musi być lock-free. Sprawdza to `is_lock_free`, a gwarancje dla konk
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Atomiki i model pamięci”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz publikację danych, ustanowienie synchronizacji, wykonanie pracy przez wiele wątków i bezpieczne zakończenie lub anulowanie. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wzajemne wykluczanie, komunikację, postęp algorytmu i czas życia danych współdzielonych. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant chroniony blokadą, memory order, ownership wątku, ślad TSan i test kontrolowanego zamknięcia. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym przykładzie producent zapisuje `data`, a potem wykonuje store z release. Konsument odczytuje ten sam atomik z acquire i przechodzi dalej dopiero po zobaczeniu wartości true z publikującego zapisu. Ten odczyt ustanawia synchronizes-with, a wcześniejszy zapis danych happens-before ich późniejszy odczyt. Ważne jest powiązanie z zaobserwowanym zapisem, a nie samo występowanie słów acquire i release gdziekolwiek w programie.
 
-Model dla tej części kompendium jest następujący: Współbieżny program opisuje relacje happens-before między operacjami. Sam czas zegarowy lub obserwowana kolejność logów nie ustanawia synchronizacji; dostęp do współdzielonego, nieatomowego obiektu bez właściwej relacji może być data race i UB. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Zastąpienie obu porządków przez relaxed zachowałoby atomowość flagi, lecz nie ustanowiłoby potrzebnej relacji dla `data`. Program mógłby mieć data race na zwykłej zmiennej. Długi czas od zapisu, `sleep_for` i widoczna kolejność logów nie zastępują tej relacji. Model pamięci określa legalność wykonania niezależnie od tego, co zwykle dzieje się na danym procesorze.
+
+Po udanej publikacji producent nie modyfikuje już danych. To istotne ograniczenie: flaga ready nie tworzy trwałej blokady. Jeśli producent zacznie nadpisywać `data`, gdy konsument jeszcze czyta, potrzebny jest kolejny etap protokołu potwierdzający zakończenie odczytu albo inny model, np. mutex lub przekazanie niezmiennego obiektu.
 
 ## Pogłębienie mechanizmu
 
-- Relaxed zapewnia atomowość bez międzywątkowego uporządkowania, release publikuje wcześniejsze zapisy, a acquire obserwujący odpowiednią wartość ustanawia synchronizes-with. Sequential consistency dodaje wspólny porządek operacji seq_cst.
+Każdy atomik ma własny porządek modyfikacji. Relaxed zachowuje niepodzielność oraz reguły spójności dla tego obiektu, ale nie tworzy globalnego obrazu wszystkich atomików. Dwa niezależne liczniki atomic mogą być odczytane w stanach z różnych momentów. Inwariant „saldo A plus saldo B pozostaje stałe” wymaga wspólnej operacji lub blokady, a nie tylko zmiany obu pól na atomic.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Atomiki i model pamięci” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Operacja read-modify-write, np. `fetch_add`, atomowo łączy odczyt starej wartości z zapisem nowej. `counter = counter + 1` wykonuje oddzielny odczyt i zapis nawet wtedy, gdy counter jest atomic, więc dwa wątki mogą zgubić aktualizację. Brak data race nie oznacza poprawności algorytmicznej. Do inkrementacji licznika używaj odpowiedniej operacji RMW.
+
+`compare_exchange_weak(expected, desired)` zapisuje desired, jeśli bieżąca wartość odpowiada expected. Przy porażce aktualizuje expected wartością odczytaną z atomika i może zawieść pozornie, dlatego zwykle działa w pętli. Porządek porażki dotyczy odczytu, więc nie może być release ani acq_rel. Obliczenie desired może wymagać powtórzenia po zmianie expected; efektów ubocznych nie wolno bezmyślnie wykonywać wiele razy wewnątrz pętli.
+
+`seq_cst` zapewnia dodatkowy wspólny porządek operacji sekwencyjnie spójnych, ale nie zwalnia z analizy czasów życia i danych nieatomowych. `memory_order_consume` w C++23 ma szczególny model zależności i problematyczne wsparcie praktyczne; typowy kod publikacji powinien preferować dobrze rozumiany acquire. Lock-free oznacza określony rodzaj postępu bez blokady implementacyjnej, nie automatycznie wait-free ani brak zagłodzenia pojedynczego wątku.
+
+Dla `atomic_ref` przestrzegaj wymaganego wyrównania i ograniczeń dostępu przez cały czas życia referencji atomowych. W tym czasie dostęp do objętego nimi obiektu ma odbywać się zgodnie z protokołem `atomic_ref`, a nie naprzemiennie zwykłymi odczytami. Dla istniejącego bufora może to być wygodna adaptacja, lecz nie usuwa obowiązku zapewnienia żywego i właściwie wyrównanego obiektu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Atomowe maksimum można obliczyć pętlą CAS. Relaxed wystarcza, ponieważ atomik reprezentuje tylko liczbę, a wyniki odczytujemy po zakończeniu wszystkich pracowników.
 
-~~~text
-Temat: Atomiki i model pamięci
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <atomic>
+#include <cassert>
+#include <thread>
+#include <vector>
+
+void update_max(std::atomic<int>& maximum, int candidate) {
+    int observed = maximum.load(std::memory_order_relaxed);
+    while (observed < candidate &&
+           !maximum.compare_exchange_weak(observed, candidate,
+               std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
+int main() {
+    std::atomic<int> maximum{0};
+    std::vector<std::jthread> workers;
+    for (int candidate : {4, 20, 7, 12}) {
+        workers.emplace_back([&, candidate] { update_max(maximum, candidate); });
+    }
+    for (auto& worker : workers) worker.join();
+    assert(maximum.load(std::memory_order_relaxed) == 20);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Jeśli inny wątek podniesie maksimum do większej liczby, nieudany CAS przepisze tę liczbę do observed i pętla może się zakończyć bez zapisu. Jeśli wartość nadal jest mniejsza od candidate, próbujemy ponownie. Nie ma tu dodatkowego rekordu „zwycięskiego zadania” publikowanego razem z liczbą; dodanie go zmieniłoby wymagania synchronizacji i atomowości całego protokołu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Atomiki i model pamięci”, oceniaj najprostszy poprawny model, możliwość anulowania, brak data race, ograniczone contention i udowodniony lifetime. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Mutex jest często prostszym rozwiązaniem dla kilku powiązanych pól i skomplikowanego czasu życia. Atomiki są użyteczne dla liczników, flag i starannie zaprojektowanych struktur. C++20 `wait/notify` pozwala unikać ciągłego aktywnego odpytywania, ale trzeba nadal zmienić wartość i ustalić właściwe porządki; notify samo nie publikuje dowolnych danych ani nie przechowuje historii wszystkich zmian.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dlaczego zamiana dwóch pól na `atomic<int>` nie czyni operacji przelewu atomową? **Odpowiedź:** każda modyfikacja jest niepodzielna osobno. Obserwator może odczytać stan po odjęciu, ale przed dodaniem. Potrzebna jest wspólna transakcja logiczna chroniona mutexem albo specjalnie zaprojektowany algorytm obejmujący oba pola.
+
+Źródła reguł: [C++23: model pamięci](https://timsong-cpp.github.io/cppwp/n4950/intro.races), [porządki atomowe](https://timsong-cpp.github.io/cppwp/n4950/atomics.order), [operacje atomików](https://timsong-cpp.github.io/cppwp/n4950/atomics.types.operations).
 
 ## Powiązane tematy
 

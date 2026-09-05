@@ -35,40 +35,61 @@ Fast-math może złamać oczekiwania IEEE, obsługę NaN, signed zero i wyjątki
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „SIMD, wektoryzacja, cache i optymalizacja”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Pętla `add` odczytuje po jednym elemencie obu wejść i zapisuje sumę. Kompilator może pogrupować iteracje, jeżeli zachowa wynik wymagany przez program. Musi uwzględnić nakładanie zakresów: gdy `output` zaczyna się wewnątrz `left`, wcześniejszy zapis może zmienić dane odczytywane przez późniejszą iterację. Utworzenie `span` nie obiecuje braku aliasowania ani poprawności dowolnego przesunięcia.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Implementacja może wygenerować test rozłączności przed pętlą, szybką ścieżkę wektorową i wolniejszą ścieżkę skalarną. Długość niepodzielna przez szerokość wektora wymaga obsługi końcówki przez maskowanie lub dodatkową pętlę. Dla dwóch elementów koszt przygotowania SIMD może przekraczać oszczędność, dlatego brak wektoryzacji tak małego przykładu nie świadczy o niezdolności kompilatora do rozpoznania wzorca.
 
 ## Pogłębienie mechanizmu
 
-- Lokalność danych często wpływa na wydajność bardziej niż liczba instrukcji źródłowych. Zero-overhead abstractions należy oceniać na assembly i profilu; szablon może usunąć dispatch, ale zwiększyć kod i presję instruction cache.
-- Autowektoryzacja wymaga niezależności iteracji, znanego aliasingu i opłacalnego układu danych. SIMD przyspiesza obliczenia tylko wtedy, gdy koszt ładowania, wyrównania, remainder loop i transferu danych nie dominuje.
+Zależność między iteracjami jest często ważniejsza niż wyrównanie. Pętla `a[i] = a[i - 1] + x` przenosi informację pomiędzy kolejnymi krokami. Pętla niezależnych dodawań nie ma takiej zależności, o ile zakresy nie nakładają się w problematyczny sposób. `const` na wejściowym wskaźniku zabrania zapisu przez ten wskaźnik, ale nie wyklucza zapisu do tej samej pamięci inną drogą.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „SIMD, wektoryzacja, cache i optymalizacja” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Wydajność ogranicza czasami przepustowość pamięci. Dodanie dwóch tablic wymaga odczytu wejść i zapisu wyniku, a wykonuje niewiele arytmetyki. Szersze rejestry mogą wtedy dawać niewielką poprawę, bo rdzeń już czeka na dane. Przy sumowaniu tylko jednego pola milionów obiektów SoA zmniejsza ilość niepotrzebnie przesyłanych danych. Przy przetwarzaniu wszystkich pól pojedynczego obiektu AoS może zachować lepszą lokalność i prostszy kod.
+
+Redukcja zmiennoprzecinkowa jest trudniejsza niż niezależne dodawanie. Zmiana nawiasowania może zmienić zaokrąglenia, więc drzewo równoległych sum nie zawsze jest równoważne pętli sekwencyjnej. Fast-math zezwala na określone uproszczenia implementacji kosztem kontraktu numerycznego, w tym szczególnego traktowania NaN lub nieskończoności. Test wyniku powinien wynikać z oczekiwanej tolerancji i modelu danych, a nie zakładać bezwarunkową identyczność bitów.
+
+False sharing powstaje przy współbieżnych zapisach do różnych obiektów współdzielących linię cache. Nie jest data race, jeśli wątki poprawnie używają odrębnych obiektów, lecz może powodować kosztowną wymianę własności linii. Padding może pomóc, ale zwiększa working set. `hardware_destructive_interference_size` jest wartością zależną od implementacji; wstawienie jej w eksportowany typ wymaga uwagi na ABI i identyczność konfiguracji jednostek translacji.
+
+Runtime dispatch musi sprawdzić nie tylko obecność instrukcji w CPU, ale również gotowość systemu operacyjnego do zachowywania odpowiedniego stanu rejestrów, gdy wymaga tego architektura. Rozszerzenia `target`, `target_clones`, intrinsics i flagi typu `-march` są narzędziami kompilatora. Kod skompilowany globalnie dla nowszej ISA może zawierać niedozwolone instrukcje nawet poza ręcznie oznaczoną szybką funkcją.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
 
-~~~text
-Temat: SIMD, wektoryzacja, cache i optymalizacja
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct Particles {
+    std::array<float, 4> x;
+    std::array<float, 4> vx;
+};
+void advance(Particles& p, float dt) {
+    for (std::size_t i = 0; i < p.x.size(); ++i)
+        p.x[i] += p.vx[i] * dt;
+}
+int main() {
+    Particles p{{0, 1, 2, 3}, {2, 2, 2, 2}};
+    advance(p, 0.5f);
+    assert(p.x[0] == 1 && p.x[3] == 4);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Osobne tablice pozycji i prędkości zapewniają ciągły dostęp do każdego pola. Każda iteracja zapisuje inny element i czyta odpowiadającą prędkość. Jest to układ sprzyjający wektoryzacji, ale standard nie obiecuje instrukcji SIMD. Liczby dobrano tak, aby proste asercje były dokładne w typowych reprezentacjach binarnych; rozbudowana symulacja potrzebuje jawnego modelu tolerancji błędu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „SIMD, wektoryzacja, cache i optymalizacja”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Najpierw mierz cały etap obliczeń na reprezentatywnym rozmiarze, a potem używaj raportu optymalizacji do wyjaśnienia wyniku. Benchmark powinien konsumować wynik, uwzględniać rozgrzanie cache i rozdzielać koszt alokacji od pętli. Ręczne intrinsics mają sens, gdy pomiar i analiza kodu maszynowego wykazują istotną lukę, a projekt potrafi utrzymać warianty ISA i skalarny fallback.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `alignas(64)` gwarantuje szybszą pętlę? **Odpowiedź:** nie, nie usuwa zależności, nie zwiększa przepustowości pamięci i nie ustala rozmiaru danych. Czy brak data race wyklucza false sharing? Nie; problem dotyczy mechanizmu cache, a nie naruszenia modelu pamięci. Czy `std::simd` jest częścią C++23? Nie; standardowy interfejs należy oznaczać jako **C++26**, a wcześniejsze biblioteki SIMD i TS rozpatrywać osobno.
+
+Źródła implementacyjne: [LLVM Loop Vectorizer](https://llvm.org/docs/Vectorizers.html) i [Clang: diagnostyka optymalizacji](https://clang.llvm.org/docs/UsersManual.html#options-to-emit-optimization-reports).
+
+### Ocena wyniku pomiaru
+
+Przed porównaniem wersji skalarnej i SIMD ustal, czy mierzysz opóźnienie pojedynczego zadania, przepustowość wielu zadań czy czas całego procesu. Inicjalizacja dispatchu może mieć znaczenie tylko przy pierwszym wywołaniu. Przetwarzanie bufora mieszczącego się w cache odpowiada innemu ograniczeniu niż strumień znacznie większy od pamięci podręcznej. Jeden rozmiar danych nie charakteryzuje całego algorytmu.
+
+Kontrola poprawności powinna objąć pusty zakres, krótkie zakresy i długości wokół wielokrotności liczby lanes. To właśnie obsługa końcówki często powoduje wyjścia poza przydział. Nie wolno odczytywać poza buforem tylko dlatego, że nadmiarowe wyniki zostaną później zamaskowane; legalność zależy od semantyki konkretnej instrukcji i kontraktu pamięci. Skalarny fallback jest też użytecznym punktem odniesienia dla walidacji.
+
+Jeżeli różnica czasu jest mała, zbierz serię pomiarów i obserwuj rozrzut. Migracja pomiędzy rdzeniami, częstotliwość procesora i konkurencyjne obciążenie mogą zasłonić zysk. Raport kompilatora odpowiada na pytanie, jak przekształcono pętlę; profiler odpowiada, gdzie zużywany jest czas. Dopiero połączenie tych informacji uzasadnia utrzymywanie bardziej złożonej implementacji.
 
 ## Powiązane tematy
 

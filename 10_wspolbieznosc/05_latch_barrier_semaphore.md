@@ -36,43 +36,67 @@ Te prymitywy są niskopoziomowymi elementami. Wyższy model powinien nazywać st
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „latch, barrier i semaphore”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz publikację danych, ustanowienie synchronizacji, wykonanie pracy przez wiele wątków i bezpieczne zakończenie lub anulowanie. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wzajemne wykluczanie, komunikację, postęp algorytmu i czas życia danych współdzielonych. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant chroniony blokadą, memory order, ownership wątku, ślad TSan i test kontrolowanego zamknięcia. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Latch zaczyna z licznikiem dwóch oczekiwanych zgłoszeń. Każdy pracownik zapisuje własny wynik, a następnie zmniejsza licznik. `wait` w głównym wątku kończy się dopiero po osiągnięciu zera i zapewnia potrzebną synchronizację, więc można wtedy odczytać oba wyniki. Pracownicy zapisują różne obiekty, dlatego nie rywalizują ze sobą o tę samą zmienną. Latch koordynuje zakończenie etapu, a nie chroni wspólnego licznika przed jednoczesnym zapisem.
 
-Model dla tej części kompendium jest następujący: Współbieżny program opisuje relacje happens-before między operacjami. Sam czas zegarowy lub obserwowana kolejność logów nie ustanawia synchronizacji; dostęp do współdzielonego, nieatomowego obiektu bez właściwej relacji może być data race i UB. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`count_down` tylko zgłasza dojście i nie musi czekać na innych. `arrive_and_wait` łączy zgłoszenie z oczekiwaniem. Licznik latch nie może zejść poniżej zera i nie można go ponownie naładować do kolejnego zadania. Ustawiona liczba powinna odpowiadać faktycznym zgłoszeniom również wtedy, gdy uruchomienie któregoś pracownika się nie powiedzie. Sama obecność RAII w uchwycie wątku nie uzupełni brakującego zgłoszenia.
+
+Barrier w każdej fazie czeka na odpowiednią liczbę przybyć, wykonuje krok zakończenia, a następnie przygotowuje następną fazę. Uczestnik może zgłosić przybycie i osobno czekać z użyciem otrzymanego tokena. `arrive_and_drop` zmniejsza wymagania także dla przyszłych faz. Jest to decyzja o trwałym opuszczeniu grupy, nie zwykły sposób pominięcia jednego oczekiwania bez konsekwencji.
 
 ## Pogłębienie mechanizmu
 
-- Latch jest jednorazowym licznikiem dojścia, barrier działa fazami i może wykonywać completion step, a semaphore kontroluje liczbę dostępnych pozwoleń. Nie zastępują one ochrony dowolnego inwariantu danych.
+Krok zakończenia barrier może agregować dane opublikowane w fazie. Zakończenie tego kroku poprzedza powrót odblokowanych oczekiwań zgodnie z gwarancjami synchronizacji. Funkcja completion musi spełniać wymagania niezgłaszania wyjątków. Nie zakładaj, że wykona ją zawsze wskazany pracownik lub wątek główny; projektuj ją tak, aby nie zależała od konkretnej tożsamości wykonawcy.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „latch, barrier i semaphore” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Jedna bariera po zapisach nie zawsze wystarczy dla algorytmu iteracyjnego. Szybki pracownik może rozpocząć nadpisywanie tablicy dla następnej rundy, kiedy wolny nadal czyta dane poprzedniej. Potrzebujesz drugiej fazy po odczytach albo rozdzielenia buforów z odpowiednim protokołem zamiany. To problem czasu życia wartości i relacji między etapami, a nie brak atomowości pojedynczego licznika barrier.
+
+Semaphore przechowuje liczbę dostępnych pozwoleń. `acquire` zużywa jedno lub czeka, a `release` dodaje określoną liczbę. W przeciwieństwie do mutexa release może wykonać inny wątek niż ten, który wcześniej zrobił acquire. To pozwala używać go do sygnalizacji producent–konsument. `try_acquire` może zawieść pozornie, więc wynik false nie jest trwałą informacją o stanie całego systemu.
+
+Maksymalna liczba pozwoleń jest ograniczona. Parametr szablonu określa co najmniej wymagane maksimum, a implementacja może wspierać większe, dostępne przez `max()`. Nie wolno wykonywać release tak, aby przekroczyć dopuszczalny licznik. Jeśli semafor ogranicza pulę zasobów, przejęcie pozwolenia powinno być połączone z oddaniem przez strażnika RAII, także przy wyjątku. Pozwolenie nie mówi jednak, który konkretnie obiekt puli został przydzielony; to może wymagać dodatkowej chronionej struktury.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Dwie fazy bariery na rundę oddzielają zapisy, odczyty i następne nadpisanie. Każdy pracownik ma własny slot, lecz podczas agregacji czyta wszystkie sloty.
 
-~~~text
-Temat: latch, barrier i semaphore
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <barrier>
+#include <cassert>
+#include <numeric>
+#include <thread>
+#include <vector>
+
+int main() {
+    constexpr int count = 3;
+    std::array<int, count> slots{};
+    std::barrier phase{count};
+    std::vector<std::jthread> workers;
+    for (int id = 0; id < count; ++id) {
+        workers.emplace_back([&, id] {
+            for (int round = 1; round <= 2; ++round) {
+                slots[static_cast<std::size_t>(id)] = round;
+                phase.arrive_and_wait();
+                const int sum = std::accumulate(slots.begin(), slots.end(), 0);
+                assert(sum == round * count);
+                phase.arrive_and_wait();
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    assert((slots == std::array<int, count>{2, 2, 2}));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwsze oczekiwanie zapewnia, że wszystkie zapisy rundy nastąpiły przed odczytami. Drugie zapewnia, że wszystkie odczyty skończyły się przed zapisami kolejnej rundy. Usunięcie drugiego oczekiwania mogłoby spowodować data race, choć pierwsza bariera nadal poprawnie liczyłaby przybycia. Przykład zakłada skuteczne utworzenie grupy; produkcyjny właściciel musi obsłużyć częściową porażkę startu, zanim inni utkną na oczekiwaniu brakujących uczestników.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „latch, barrier i semaphore”, oceniaj najprostszy poprawny model, możliwość anulowania, brak data race, ograniczone contention i udowodniony lifetime. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Latch pasuje do jednorazowego oczekiwania na gotowość, barrier do powtarzalnych etapów współpracującej grupy, a semaphore do liczby dostępnych zasobów lub przekazywanych pozwoleń. Condition variable jest bardziej elastyczna, gdy warunek obejmuje kilka pól i zamknięcie. Żaden z tych mechanizmów sam nie ustala polityki anulowania, sprawiedliwości ani bezpiecznego zniszczenia obiektu, na którym ktoś nadal czeka.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `binary_semaphore` można zawsze zastąpić mutexem? **Odpowiedź:** nie. Jeśli producent wykonuje release, a konsument acquire, nie występuje własność blokady przypisana temu samemu wątkowi. Mutex wymaga odblokowania przez właściciela. Semafor może przekazywać sygnał między różnymi wykonawcami, co stanowi inny protokół.
+
+Źródła reguł: [C++23: latch](https://timsong-cpp.github.io/cppwp/n4950/thread.latch), [barrier](https://timsong-cpp.github.io/cppwp/n4950/thread.barrier), [semaphore](https://timsong-cpp.github.io/cppwp/n4950/thread.sema).
 
 ## Powiązane tematy
 
 - [Wątki i jthread](01_thread_jthread_i_stop_token.md)
 - [Atomiki](04_atomiki_i_model_pamieci.md)
 - [RAII](../03_pamiec_i_czas_zycia/03_raii_i_destruktory.md)
-

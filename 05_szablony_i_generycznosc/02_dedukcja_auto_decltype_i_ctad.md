@@ -30,43 +30,62 @@ CTAD (*class template argument deduction*) pozwala wywnioskować parametry szabl
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Dedukcja, auto, decltype i CTAD”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zebranie argumentów, dedukcję parametrów, sprawdzenie ograniczeń, wybór specjalizacji i instancjację użytej postaci. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd substytucji, niespełnione constraint i błąd wewnątrz już wybranej instancji. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wydedukowane typy, zbiór kandydatów, spełnione constraints oraz minimalną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Dla `auto x = expression` wyobraź sobie dedukcję parametru przekazywanego przez wartość. Referencyjność źródła oraz najwyższe `const` nie przechodzą do nowego obiektu. Jeśli źródło ma typ `const int*`, usuwanie najwyższych kwalifikatorów nie usuwa stałości wskazanego `int`. To inny poziom typu. `auto&` żąda związania referencji i zachowuje kwalifikację obiektu źródłowego.
 
-Model dla tej części kompendium jest następujący: Szablon jest przepisem na deklaracje zależne od argumentów, a nie kodem wykonywanym w runtime. Dedukcja, lookup, ograniczenia i instancjacja zachodzą w różnych momentach; pomieszanie tych faz prowadzi do trudnych diagnostyk. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`auto&&` podczas odpowiedniej dedukcji zachowuje się jak forwarding reference. Dla lvalue typu `T` dedukcja i zwijanie referencji prowadzą do `T&`. Dla rvalue zwykle powstaje `T&&`. We wszystkich tych przypadkach użycie samej nazwy zadeklarowanej zmiennej jest wyrażeniem lvalue. Aby przekazać dalej oryginalną kategorię, kod generyczny stosuje `std::forward` z właściwie wydedukowanym parametrem.
+
+`decltype` ma szczególną regułę dla nieujętej w nawiasy nazwy lub dostępu do pola: daje zadeklarowany typ oznaczonej encji. Poza tym bada kategorię wyrażenia: lvalue daje `T&`, xvalue daje `T&&`, a prvalue daje `T`. Dlatego `decltype(value)` i `decltype((value))` mogą się różnić. Dodatkowe nawiasy nie są tu wyłącznie zmianą wizualną.
 
 ## Pogłębienie mechanizmu
 
-- `auto` stosuje reguły zbliżone do dedukcji parametru szablonu i zwykle usuwa referencję oraz top-level const. `decltype(expr)` zachowuje typ zależnie od formy wyrażenia, a `decltype((name))` uwzględnia kategorię wartości.
+`decltype(auto)` stosuje dokładnie reguły `decltype` do inicjalizatora lub zwracanego wyrażenia. Zapis `decltype(auto) x = value;` może utworzyć wartość, a `decltype(auto) x = (value);` referencję. W funkcji zwracającej obiekt własnościowy przypadkowe nawiasy wokół lokalnej nazwy mogą więc stworzyć wiszącą referencję. Typ dedukowany nie zwalnia z analizy życia obiektu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Dedukcja, auto, decltype i CTAD” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Nawiasy klamrowe mają odrębne reguły. `auto a = {1, 2}` daje `std::initializer_list<int>`, a `auto b{1}` daje `int`. Bezpośrednia inicjalizacja `auto b{1, 2}` jest niepoprawna. Zwykły szablon `f(T)` nie potrafi na ogół wydedukować `T` z samego `{1, 2}`, ponieważ lista klamrowa nie jest zwykłym wyrażeniem o jednym typie. Parametr `initializer_list<T>` stanowi odpowiednio zaprojektowany wyjątek.
+
+Dedukcja przekazywana przez wartość zwykle zamienia tablicę na wskaźnik, a referencyjna może zachować rozmiar tablicy. To wpływa na `auto text = "abc"`, którego typem jest wskaźnik do stałych znaków. `auto& text = "abc"` zachowuje referencję do tablicy. Żaden z tych zapisów nie tworzy samodzielnego `std::string`.
+
+CTAD tworzy zbiór przewodników dedukcji, między innymi na podstawie konstruktorów, i wybiera parametry klasy. Dopiero potem odbywa się inicjalizacja obiektu konkretnej specjalizacji. Deduction guide nie jest wykonywaną funkcją i nie tworzy brakującego konstruktora. Może wybrać typ o zamierzonej własności, na przykład kopiujący dane zamiast zachowujący referencję, ale wybrany typ nadal musi nadawać się do inicjalizacji.
+
+Brak dedukcji nie oznacza braku możliwej konwersji. Gdy parametr występuje wyłącznie w kontekście niededukowanym, argument szablonu trzeba uzyskać z innego miejsca albo podać jawnie. `std::type_identity_t<T>` od C++20 pozwala świadomie wyłączyć dedukcję z danego parametru. Przydaje się, kiedy pierwszy argument określa typ, a drugi ma się do niego skonwertować.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Program sprawdza kategorie wyrażeń i pokazuje, że utworzenie kopii jest niezależną decyzją od dostępu do referencji. Wszystkie zależności typów są kontrolowane przez kompilator.
 
-~~~text
-Temat: Dedukcja, auto, decltype i CTAD
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <type_traits>
+#include <utility>
+
+int main() {
+    int value = 7;
+    auto&& alias = value;
+    auto&& temporary = 9;
+    decltype(auto) copy = value;
+    decltype(auto) reference = (value);
+    static_assert(std::is_same_v<decltype(alias), int&>);
+    static_assert(std::is_same_v<decltype(temporary), int&&>);
+    static_assert(std::is_same_v<decltype((temporary)), int&>);
+    static_assert(std::is_same_v<decltype(std::move(value)), int&&>);
+    static_assert(std::is_same_v<decltype(copy), int>);
+    static_assert(std::is_same_v<decltype(reference), int&>);
+    reference = 12;
+    assert(value == 12 && copy == 7);
+    assert(temporary == 9);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`temporary` jest referencją rvalue, ale jej nazwa nadal oznacza lvalue. Życie związanej tutaj liczby tymczasowej jest przedłużone przez lokalne związanie. Takiej gwarancji nie można przenosić bez sprawdzenia na referencję zwróconą z innej funkcji.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Dedukcja, auto, decltype i CTAD”, oceniaj czytelny kontrakt, krótka diagnostyka, ograniczona liczba instancji i brak metaprogramowania bez wartości dla użytkownika API. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj zwykłego `auto` do niezależnej wartości, `const auto&` do odczytu istniejącego obiektu, a `decltype(auto)` wtedy, gdy propagowanie dokładnego typu i referencyjności należy do kontraktu. Dla API, w którym własność ma być od razu czytelna, jawny typ wyniku często jest cenniejszy niż oszczędność kilku znaków. CTAD jest wygodne, gdy wybierany typ odpowiada oczywistej intencji danych wejściowych.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dla `const int* pointer` jaki typ ma `auto copy = pointer`? Czy można przez `copy` zmienić wskazaną liczbę?
 
-## Pułapki
+**Odpowiedź.** Typem jest `const int*`. Sam wskaźnik można przestawić, ale stałość wskazanego obiektu pozostaje. `auto` usuwa tylko najwyższe kwalifikacje przy dedukcji przez wartość, nie wszystkie `const` wewnątrz złożonego typu.
 
-`auto list{1, 2}` i `auto value{1}` nie dedukują zawsze tego samego rodzaju konstrukcji; reguły inicjalizacji listowej mają szczególne przypadki. Nie polegaj na dedukcji, jeśli jawny typ dokumentuje jednostkę, precyzję, własność lub koszt konwersji.
+Źródła: [dedukcja auto](https://timsong-cpp.github.io/cppwp/n4950/dcl.type.auto.deduct), [decltype](https://timsong-cpp.github.io/cppwp/n4950/dcl.type.decltype), [CTAD](https://timsong-cpp.github.io/cppwp/n4950/over.match.class.deduct).
 
 ## Powiązane tematy
 

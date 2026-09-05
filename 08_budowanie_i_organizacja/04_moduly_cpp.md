@@ -28,43 +28,69 @@ Moduły nie rozwiązują stabilności ABI, dystrybucji bibliotek binarnych ani w
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Moduły C++”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz odnalezienie deklaracji, przetworzenie zależności, utworzenie plików obiektowych, rozwiązanie symboli i złożenie końcowego artefaktu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel zależność źródłową, wymaganie użycia biblioteki, szczegół ABI oraz ustawienie prywatne konkretnego targetu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź graf targetów, pełne komendy kompilacji, tablicę symboli, kolejność linkowania i zawartość pakietu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Deklaracja `export module math;` oznacza główną jednostkę interfejsu nazwanego modułu. `export` przy funkcji udostępnia ją importerom. Kompilator przetwarza interfejs i zapisuje własny artefakt informacji semantycznej, często nazywany BMI. Jednostka z `import math;` musi uzyskać dostęp do tego artefaktu podczas kompilacji. Nie wystarcza dopiero późniejsze przekazanie pliku obiektowego linkerowi.
 
-Model dla tej części kompendium jest następujący: Projekt C++ jest grafem jednostek translacji, modułów, bibliotek i artefaktów. Kompilator analizuje jednostki osobno, linker łączy definicje, a system budowania musi odtworzyć zależności i opcje w sposób powtarzalny. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Zbudowanie zależnego programu wymaga więc kolejności: interfejs dostawcy przed kompilacją importera, a następnie linkowanie kodu obu jednostek. Konkretne narzędzie może generować BMI i plik obiektowy w jednym lub kilku krokach. Rozszerzenie `.cppm` jest konwencją toolchainu, nie semantyczną treścią deklaracji modułu. System budowania musi rozpoznać importy i zapisać ich zależności również przy kompilacji równoległej.
+
+`export import other;` udostępnia importerowi także eksportowany interfejs zależności. Zwykłe `import other;` pozwala korzystać z niego wewnętrznie bez takiego reeksportu. To decyzja o publicznym API: reeksport zwiększa zakres, od którego zależy klient. Rozdzielaj zależności potrzebne użytkownikowi interfejsu od tych używanych tylko w implementacji.
 
 ## Pogłębienie mechanizmu
 
-- Moduł eksportuje deklaracje semantycznie zamiast tekstowego wklejania nagłówka. BMI jest artefaktem zależnym od kompilatora i opcji, dlatego jego budowanie musi być częścią grafu, a nie ręcznie kopiowanym plikiem.
+Global module fragment zaczyna się od `module;` i pozwala umieścić dyrektywy preprocesora przed deklaracją nazwanego modułu. To zwykłe miejsce dla nagłówków starszych bibliotek wymagających tekstowego dołączenia. Deklaracje po `export module` są już związane z odpowiednim kontekstem modułu. Mechaniczne przeniesienie wszystkich include do tej części może zmienić przywiązanie deklaracji i wywołać problemy przy współistnieniu z innymi jednostkami.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Moduły C++” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Named modules nie eksportują makr do importera. Makro zdefiniowane w importerze nie powinno konfigurować już skompilowanego interfejsu tak, jak konfigurowało tekstowy nagłówek. Header units są osobnym mechanizmem: import nagłówka ma szczególne zasady, między innymi dotyczące makr. Nie mieszaj ich z obietnicami izolacji nazwanego modułu i nie zakładaj, że obsługa jednego mechanizmu oznacza pełną obsługę drugiego przez build system.
+
+Partycje dzielą moduł na jednostki o nazwach takich jak `math:detail`. Mogą dostarczać części interfejsu lub implementacji. Zwykli klienci importują nazwany moduł, a wewnętrzny podział powinien pozostawać jego sprawą. Jednostka implementacji zaczyna się od `module math;` bez `export` i może definiować funkcje zadeklarowane w interfejsie. Nieeksportowane nazwy nie są po prostu równoważne `private` klasy: widoczność, osiągalność deklaracji i linkage są oddzielnymi pojęciami.
+
+BMI nie jest przenośnym odpowiednikiem pliku nagłówkowego dla dowolnego kompilatora. Może zależeć od wersji kompilatora, opcji, ścieżek i biblioteki standardowej. Dystrybucja samego BMI między różnymi toolchainami wymaga udokumentowanego wsparcia konkretnej implementacji. Moduł nie zwalnia także z dostarczenia kodu wykonywalnego dla zwykłych funkcji. Import usuwa tekstowe kopiowanie interfejsu, ale nie usuwa linkowania.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Globalny fragment izoluje tradycyjny nagłówek, a implementacja pozostaje w oddzielnej jednostce. Poniższy opis CMake korzysta z file set `CXX_MODULES`, dostępnego od CMake 3.28; potrzebny jest również wspierany kompilator, skaner zależności i generator.
 
 ~~~text
-Temat: Moduły C++
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+// arithmetic.cppm
+module;
+#include <cstdint>
+export module arithmetic;
+export std::int64_t twice(std::int32_t value);
+
+// arithmetic.cpp
+module;
+#include <cstdint>
+module arithmetic;
+std::int64_t twice(std::int32_t value) {
+    return static_cast<std::int64_t>(value) * 2;
+}
+
+// main.cpp
+import arithmetic;
+int main() { return twice(21) == 42 ? 0 : 1; }
+
+# CMakeLists.txt
+cmake_minimum_required(VERSION 3.28)
+project(module_example LANGUAGES CXX)
+add_library(arithmetic)
+target_sources(arithmetic PUBLIC
+    FILE_SET CXX_MODULES FILES arithmetic.cppm)
+target_sources(arithmetic PRIVATE arithmetic.cpp)
+target_compile_features(arithmetic PUBLIC cxx_std_23)
+add_executable(app main.cpp)
+target_link_libraries(app PRIVATE arithmetic)
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Rozszerzenie typu przed mnożeniem sprawia, że wynik mieści się dla całej dziedziny `int32_t` na implementacji dostarczającej te typy. To niezależna kwestia od organizacji modułów. Konfigurację budowania należy sprawdzić dla konkretnego narzędzia zgodnie z aktualną tabelą wsparcia CMake; sama wersja minimalna projektu nie zapewnia obsługi modułów w Apple Clang ani w każdym generatorze.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Moduły C++”, oceniaj hermetyczność, szybkość przebudowy, przenośność konfiguracji, kontrola publicznych zależności i zgodność ABI. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Moduły są atrakcyjne w dużych projektach z uporządkowanymi granicami bibliotek i kontrolowanym toolchainem. Nagłówki pozostają praktyczne dla szerokiej dystrybucji, integracji C oraz starszych środowisk. Migrację zacznij od małego modułu i zmierz pełne oraz przyrostowe budowanie. Skrócenie parsowania nie gwarantuje przyspieszenia całego zadania, jeśli graf importów ogranicza równoległość albo dominują instancjacje szablonów.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy po skompilowaniu `arithmetic.cppm` można skompilować `main.cpp` i pominąć obiekt implementacji przy linkowaniu? **Odpowiedź:** nie, funkcja `twice` ma definicję w jednostce implementacji. BMI przekazuje deklarację potrzebną do kompilacji, a kod funkcji nadal musi trafić do programu. To dwa różne rodzaje artefaktów.
+
+Źródła: [C++23: moduły](https://timsong-cpp.github.io/cppwp/n4950/module), [CMake i obsługa modułów](https://cmake.org/cmake/help/latest/manual/cmake-cxxmodules.7.html), [oficjalna dokumentacja modułów Clang](https://clang.llvm.org/docs/StandardCPlusPlusModules.html).
 
 ## Powiązane tematy
 
 - [Translation units i nagłówki](01_translation_units_headers_i_include.md)
 - [CMake](05_cmake.md)
 - [ODR, moduły i FFI](../zaawansowane/13_odr_moduly_ffi_i_interoperacyjnosc.md)
-

@@ -5,29 +5,34 @@
 `std::ifstream`, `std::ofstream` i `std::fstream` zarządzają uchwytem pliku przez RAII. Tryb otwarcia określa odczyt, zapis, dopisywanie, truncation i binarność. Destruktor zamyka plik, ale błąd końcowego zapisu może wymagać jawnego `flush` lub `close` i sprawdzenia stanu przed destrukcją.
 
 ~~~cpp
-#include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 
-int main() {
-    const auto path = std::filesystem::temp_directory_path() / "cpp_compendium.txt";
-    {
-        std::ofstream output{path};
-        output << "C++23\n";
-        assert(output.good());
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        std::cerr << "Użycie: program PLIK\n";
+        return EXIT_FAILURE;
     }
-    {
-        std::ifstream input{path};
-        std::string line;
-        std::getline(input, line);
-        assert(line == "C++23");
+    const std::filesystem::path path{argv[1]};
+    std::ifstream input{path};
+    if (!input) {
+        std::cerr << "Nie można otworzyć pliku.\n";
+        return EXIT_FAILURE;
     }
-    std::filesystem::remove(path);
+    std::string first_line;
+    if (std::getline(input, first_line)) {
+        std::cout << first_line << '\n';
+    } else if (!input.eof() || input.bad()) {
+        std::cerr << "Błąd odczytu.\n";
+        return EXIT_FAILURE;
+    }
 }
 ~~~
 
-Walidator kompendium jedynie kompiluje ten blok, więc nie tworzy pliku. W prawdziwym teście nazwa pliku musi być unikalna, cleanup odporny na wyjątki, a środowisko może ograniczać zapis.
+Program czyta pierwszy wiersz wskazanego pliku i odróżnia nieudane otwarcie od błędu odczytu. Pusty plik traktuje jako poprawne wejście bez wiersza. Przykład nie nadpisuje istniejących plików; do ćwiczeń zapisu używaj osobnego katalogu testowego i jawnie wybranej polityki nadpisania.
 
 `std::filesystem::path` reprezentuje ścieżkę zgodnie z platformą. Operator `/` łączy komponenty bez ręcznego separatora. Funkcje mają wariant rzucający `filesystem_error` oraz overload z `std::error_code`, co pozwala wybrać model błędów. Symlinki, uprawnienia, race między sprawdzeniem a użyciem i różnice kodowania wymagają uwagi.
 
@@ -35,39 +40,50 @@ Odczyt całego pliku do pamięci jest prosty, ale nieodpowiedni dla niezaufanego
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Pliki i filesystem”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz normalizację wejścia, wykonanie operacji systemowej lub bibliotecznej, sprawdzenie wyniku i zamknięcie zasobu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel format danych od obiektu domenowego, czas monotoniczny od kalendarzowego oraz API standardowe od zależności platformowej. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź kod błędu, liczbę przetworzonych bajtów, stan strumienia, jednostkę pomiaru i wynik dla przerwanej operacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Oddziel utworzenie ścieżki od operacji na systemie plików. Złożenie `directory / "report.txt"` jedynie oblicza nazwę; nie tworzy katalogu ani nie sprawdza uprawnień. Konstrukcja strumienia próbuje otworzyć plik. Dopiero odczyt lub zapis wykonuje właściwą pracę, a jego powodzenie trzeba sprawdzać także po udanym otwarciu.
 
-Model dla tej części kompendium jest następujący: I/O przekracza granicę procesu i dlatego jest częściowe, opóźnione oraz zależne od reprezentacji. Każda operacja potrzebuje modelu błędów, limitu danych, kodowania lub jednostki oraz zasad własności uchwytu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy zapisie istotnego wyniku sprawdź stan po operacjach i po jawnym zamknięciu. Nie czekaj na destruktor, aby dopiero wtedy próbować dowiedzieć się o błędzie. RAII zapewnia zwolnienie uchwytu przy wyjściu, ale destruktor nie jest wygodnym kanałem zgłaszania nieudanego zapisu. W API oddziel zatem automatyczne sprzątanie od jawnego zatwierdzenia wyniku.
 
 ## Pogłębienie mechanizmu
 
-- Ścieżka jest wartością składniową zależną od platformy, a istnienie celu może zmienić się między sprawdzeniem i użyciem. Operację należy wykonać i obsłużyć jej rzeczywisty `error_code` lub wyjątek zamiast ufać wcześniejszemu testowi.
+`app` oznacza dopisywanie na końcu przy zapisach, a `ate` początkowe ustawienie pozycji na końcu po otwarciu. To różne kontrakty: późniejsze przesunięcie pozycji w trybie `ate` może zmienić miejsce zapisu. Zwykły `ofstream` otwiera plik do zapisu z semantyką mogącą usunąć wcześniejszą zawartość. Przed użyciem nazwy dostarczonej przez użytkownika określ, czy nadpisanie jest dozwolone.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Pliki i filesystem” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`binary` wyłącza platformowe przekształcenia właściwe trybowi tekstowemu; nie zamienia obiektu C++ w przenośny format binarny. Nadal trzeba określić układ pól i kodowanie. W API `read` sprawdzaj również `gcount`, ponieważ końcowy odczyt może zwrócić mniej znaków niż rozmiar bufora. Pętla kopiująca plik musi uwzględnić ten ostatni fragment.
+
+Operacje leksykalne na ścieżce nie rozwiązują symlinków. `lexically_normal` upraszcza zapis komponentów, podczas gdy `canonical` odwołuje się do systemu plików. Nawet ścieżka uznana wcześniej za poprawną może zacząć wskazywać inny obiekt między sprawdzeniem a użyciem. To problem TOCTOU. Ochrona katalogu przed niezaufanymi ścieżkami często wymaga API operującego na uchwytach i reguł specyficznych dla systemu, a nie porównania prefiksu tekstowego.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <filesystem>
 
-~~~text
-Temat: Pliki i filesystem
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    namespace fs = std::filesystem;
+    const fs::path raw = fs::path{"reports"} / "draft" / ".." / "final.txt";
+    const auto normalized = raw.lexically_normal();
+    assert(normalized == fs::path{"reports"} / "final.txt");
+    assert(normalized.filename() == "final.txt");
+    assert(normalized.extension() == ".txt");
+    const auto renamed = fs::path{normalized}.replace_extension(".csv");
+    assert(renamed.filename() == "final.csv");
+    assert(normalized.filename() == "final.txt");
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Program nie potrzebuje istniejącego katalogu i niczego nie zapisuje. `replace_extension` modyfikuje obiekt ścieżki, na którym zostało wywołane; tutaj jest to kopia. Nie zmienia nazwy rzeczywistego pliku. Takie rozdzielenie pozwala testować logikę nazw bez zależności od uprawnień i zawartości dysku.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Pliki i filesystem”, oceniaj jawne kodowanie, kontrolowane limity, odporność na częściowy odczyt, bezpieczne ścieżki i deterministyczne sprzątanie. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Stosuj warianty z `error_code`, gdy niepowodzenie jest oczekiwanym wynikiem przeglądania systemu plików i chcesz jawnie zebrać błędy. Wariant rzucający wyjątek upraszcza przerwanie większej operacji po niepowodzeniu. Nie interpretuj wartości zwrotnej niezależnie od kodu błędu: „nie istnieje” i „nie mogę sprawdzić” mogą wymagać innej reakcji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Atomowa widoczność nowej wersji pliku i trwałość po utracie zasilania to różne wymagania. `flush` opróżnia bufor warstwy strumienia, ale nie daje uniwersalnej gwarancji zapisu na trwałym nośniku. Schemat plik tymczasowy plus zamiana nazwy wymaga analizy konkretnego systemu plików, granic woluminu i operacji synchronizacji. Samo RAII nie zapewnia transakcji.
+
+## Ćwiczenie z odpowiedzią
+
+Czy `exists(path)` przed otwarciem dowodzi, że otworzysz ten sam plik? Nie: inny proces może go podmienić. Czy normalizacja `a/../b` dowodzi bezpieczeństwa względem dowiązań? Również nie, ponieważ to operacja leksykalna. Dla zwykłego narzędzia raportowego może wystarczyć obsługa błędu otwarcia; dla granicy bezpieczeństwa potrzebny jest silniejszy model dostępu.
+
+Źródło kontraktów operacji: [C++23, filesystem operations](https://timsong-cpp.github.io/cppwp/n4950/fs.op.funcs).
 
 ## Powiązane tematy
 

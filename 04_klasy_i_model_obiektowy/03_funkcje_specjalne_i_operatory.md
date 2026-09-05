@@ -40,39 +40,69 @@ Assignment powinien obsługiwać samoprzypisanie zgodnie z kontraktem. Idiom cop
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Funkcje specjalne i operatory”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Najpierw ustal, czy zapis tworzy nowy obiekt, czy zmienia istniejący. `T b = a;` wywołuje konstrukcję kopiującą, a `b = a;` operator przypisania. Domyślny konstruktor kopiujący inicjalizuje bazy i pola z odpowiednich części źródła. Domyślny operator przypisania przypisuje do już istniejących podobiektów, co może być niemożliwe dla stałych pól lub referencji.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Kompilator deklaruje funkcje specjalne według reguł całej klasy. Każdy konstruktor deklarowany przez użytkownika wpływa na dostępność automatycznego konstruktora domyślnego. Deklarowany destruktor blokuje automatyczne deklarowanie ruchu. Pole niekopiowalne może usunąć domyślną kopię klasy. Zapis `= default` prosi o mechanizm języka, ale nie wymusza legalności operacji, której nie potrafi wykonać któreś pole.
+
+W przykładzie `Point` operator dodawania konstruuje nową wartość. Domyślne porównanie analizuje kolejno `x_` i `y_`, więc kolejność pól staje się częścią porządku. Nie jest to porządek według odległości od początku układu ani sortowanie po sumie współrzędnych. Wybór operatora powinien odpowiadać udokumentowanemu znaczeniu typu.
 
 ## Pogłębienie mechanizmu
 
-- Zadeklarowanie części funkcji specjalnych wpływa na automatyczne generowanie pozostałych. Przeciążony operator powinien zachowywać oczekiwaną semantykę, a operatory symetryczne często korzystają z nieczłonkowskiej funkcji lub hidden friend.
+Funkcja domyślnie zdefiniowana przy pierwszej deklaracji zachowuje inne własności niż funkcja najpierw zadeklarowana, a dopiero poza klasą zdefiniowana przez `= default`. W tym drugim przypadku jest user-provided, co może wpłynąć na trywialność i zachowanie inicjalizacji wartościowej. Nie traktuj przesunięcia `= default` do pliku źródłowego jako zawsze czysto kosmetycznego zabiegu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Funkcje specjalne i operatory” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Usunięta funkcja nadal uczestniczy w wyborze przeciążenia. Jeśli jest najlepsza, wywołanie jest błędne; kompilator nie ma obowiązku szukać mniej pasującej dozwolonej alternatywy. Pozwala to świadomie blokować niechciane konwersje. Specjalne reguły dotyczą niektórych domyślnie usuniętych operacji ruchu, dlatego warto badać konkretny zestaw funkcji zamiast mechanicznie stosować jedną heurystykę.
+
+Operator składowy ma niejawny parametr obiektu po lewej. Operator nieskładowy, często przyjaciel typu, może umożliwić symetryczne konwersje obu operandów. Typowy wzorzec implementuje `+=` jako podstawową operację, a `+` przez utworzenie kopii lewego argumentu i użycie `+=`. Zapobiega rozchodzeniu się definicji dodawania i dodawania z przypisaniem.
+
+Nie wszystkie operatory mogą być przeciążane: nie można zmienić działania `.` ani `::`, a nowe symbole nie stają się operatorami. Przeciążone `&&` i `||` nie pomijają ewaluacji argumentów. Z kolei operator indeksowania powinien jasno określać sprawdzanie granic i rodzaj zwracanej referencji, ponieważ użytkownik może przechować ten wynik dłużej niż obiekt.
+
+Domyślne `<=>` może zwracać kategorię silnego, słabego lub częściowego porządku wynikającą z podobiektów. Pole `double` prowadzi zwykle do `partial_ordering`, ponieważ NaN jest nieuporządkowane. Przypadkowe dodanie cache do domyślnego porównania może sprawić, że dwie logicznie równe wartości staną się nierówne. Operator `==` i funkcja haszująca muszą uzgadniać znaczenie równości, jeśli typ ma być kluczem kontenera nieuporządkowanego.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Ten typ ma jedno znaczenie liczbowe, symetryczne dodawanie i domyślne porównanie. Żadna operacja nie zarządza surowym zasobem, więc ręczne definiowanie kopiowania i destrukcji byłoby zbędne.
 
-~~~text
-Temat: Funkcje specjalne i operatory
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <compare>
+
+class Distance {
+    int metres_;
+public:
+    explicit Distance(int value) : metres_{value} {}
+    Distance& operator+=(Distance other) {
+        metres_ += other.metres_;
+        return *this;
+    }
+    friend Distance operator+(Distance left, Distance right) {
+        left += right;
+        return left;
+    }
+    auto operator<=>(const Distance&) const = default;
+};
+
+int main() {
+    Distance first{3};
+    const Distance second{4};
+    assert((first + second == Distance{7}));
+    assert(first == Distance{3});
+    Distance& same = (first += second);
+    assert(&same == &first);
+    assert(first > second);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Przekazywanie niewielkiego `Distance` przez wartość jest celowe. `+` modyfikuje tylko swoją kopię, natomiast `+=` zmienia odbiorcę i zwraca referencję do niego. Przykład wymaga, aby suma mieściła się w `int`; produkcyjny typ jednostki powinien określić politykę przepełnienia.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Funkcje specjalne i operatory”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Stosuj operator, gdy ma powszechnie rozumiane znaczenie dla typu. Działania takie jak zapis do sieci, kosztowna aktualizacja bazy czy walidowana zmiana jednostki zwykle lepiej wyrazić nazwaną metodą. Zanim dopiszesz funkcję specjalną, sprawdź, czy to reprezentacja wymaga zmiany: pole RAII często usuwa potrzebę całej ręcznej obsługi zasobów.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Klasa ma pole `const int id`. Dlaczego może pozwalać na kopiowanie przy konstrukcji, a odrzucać przypisanie?
+
+**Odpowiedź.** Konstruktor może zainicjalizować nowe stałe pole wartością źródła. Operator przypisania musiałby zmienić już istniejące `id`, czego `const` zabrania. Dostępność konstrukcji i przypisania to odrębne własności typu; nie należy zakładać jednej na podstawie drugiej.
+
+Źródła: [funkcje specjalne](https://timsong-cpp.github.io/cppwp/n4950/special), [funkcje default i delete](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct.def.default), [przeciążone operatory](https://timsong-cpp.github.io/cppwp/n4950/over.oper), [porównania domyślne](https://timsong-cpp.github.io/cppwp/n4950/class.compare).
 
 ## Powiązane tematy
 

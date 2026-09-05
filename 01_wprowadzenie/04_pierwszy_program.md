@@ -2,7 +2,7 @@
 
 # Pierwszy program
 
-Wykonanie programu C++ rozpoczyna się w funkcji `main`. Najprostsza poprawna postać zwraca `int`; dojście do jej końca jest równoważne `return 0`. Argumenty wiersza poleceń są dostępne przez `argc` i `argv`, ale nie trzeba ich deklarować, jeśli program ich nie używa.
+W typowym środowisku hosted funkcja `main` jest punktem wejścia logiki programu C++; inicjalizacja części obiektów statycznych może zachodzić przed jej wywołaniem. Najprostsza poprawna postać zwraca `int`; dojście do jej końca jest równoważne `return 0`. Argumenty wiersza poleceń są dostępne przez `argc` i `argv`, ale nie trzeba ich deklarować, jeśli program ich nie używa.
 
 ~~~cpp
 #include <iostream>
@@ -24,43 +24,56 @@ Brak średnika albo nieznana nazwa powodują błąd kompilacji. Zadeklarowanie f
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Pierwszy program”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz przejście od tekstu źródłowego przez analizę składniową i semantyczną do artefaktu wykonywalnego. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie standardu od rozszerzenia kompilatora, ustawienia toolchainu i zachowania platformy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź pełne polecenie kompilacji, wersje narzędzi, diagnostykę oraz wynik uruchomienia w kontrolowanym środowisku. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Zapisz program w pliku tekstowym z rozszerzeniem `.cpp`, a następnie skompiluj go z wybranym standardem. Nagłówki dostarczają deklaracji potrzebnych do sprawdzenia kodu. Kompilator musi rozpoznać typ `std::string` przed utworzeniem zmiennej `language`, a operator wyjścia musi obsługiwać przekazywane wartości. Sama nazwa pliku wykonywalnego nie musi być taka sama jak nazwa źródła.
 
-Model dla tej części kompendium jest następujący: Program C++ powstaje w łańcuchu źródło–kompilator–linker–środowisko wykonawcze. Standard opisuje zachowanie programu abstrakcyjnego, implementacja wybiera reprezentację i ABI, a system operacyjny dostarcza proces, pliki oraz biblioteki. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Po uruchomieniu środowisko przygotowuje proces i wywołuje `main`. Część inicjalizacji obiektów statycznych może odbyć się wcześniej, dlatego `main` nie jest pierwszą możliwą operacją napisaną w C++. W typowym programie hosted jest jednak punktem wejścia logiki aplikacji. Środowiska freestanding, na przykład niektóre systemy wbudowane, mają dodatkowe reguły startu określane przez implementację.
+
+Wewnątrz funkcji inicjalizacja `language` tworzy napis, a wyrażenie ze strumieniem zapisuje tekst. Instrukcje są zakończone średnikami. Nawiasy klamrowe wyznaczają ciało funkcji i zakres lokalnych obiektów. Wyjście z funkcji niszczy lokalny napis, po czym kod zakończenia jest przekazywany środowisku.
 
 ## Pogłębienie mechanizmu
 
-- Funkcja `main` jest punktem wejścia programu hostowanego, a jej zakończenie zwraca status środowisku. Nagłówki udostępniają deklaracje; samo dołączenie nagłówka nie kopiuje gotowej biblioteki do programu.
+`main` ma specjalne reguły: zwraca `int`, a dojście do końca jego ciała oznacza sukces. Nie przenoś tego wyjątku na zwykłą funkcję zwracającą liczbę; ona powinna dostarczyć wynik na odpowiedniej ścieżce. Przenośnym sposobem oznaczenia powodzenia jest `0` lub `EXIT_SUCCESS`, a niepowodzenia `EXIT_FAILURE` z `<cstdlib>`. Znaczenie innych kodów ustala otoczenie programu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Pierwszy program” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Znak `\n` wewnątrz literału oznacza nową linię. Pojedyncze cudzysłowy tworzą literał znaku, a podwójne literał tablicy znaków. Sam napis `"C++23"` i obiekt `std::string` są różnymi bytami: drugi przechowuje wartość i udostępnia operacje tekstowe. Tę różnicę warto rozumieć przed nauką wskaźników i własności.
+
+Strumień wejściowy nie zgaduje intencji użytkownika. Niepoprawny tekst, koniec danych i błąd urządzenia mogą uniemożliwić odczyt. Sprawdzaj wynik operacji, zanim użyjesz wartości. Inicjalizacja zmiennej na zero daje określony stan początkowy, lecz nie zamienia błędnego wejścia w poprawną liczbę. Oba zagadnienia trzeba obsłużyć osobno.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cstdlib>
+#include <iostream>
+#include <string>
 
-~~~text
-Temat: Pierwszy program
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    std::cout << "Podaj imię: ";
+    std::string name;
+    if (!std::getline(std::cin, name)) {
+        std::cerr << "Nie udało się odczytać wiersza.\n";
+        return EXIT_FAILURE;
+    }
+    if (name.empty()) {
+        std::cerr << "Imię nie może być puste.\n";
+        return EXIT_FAILURE;
+    }
+    std::cout << "Witaj, " << name << "!\n";
+    return EXIT_SUCCESS;
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Program rozróżnia brak odczytu i poprawnie odczytany pusty wiersz. `getline` zachowuje spacje wewnątrz imienia; w przeciwieństwie do `operator>>` dla napisu nie kończy na pierwszej spacji. Zwykłe powiązanie `cin` ze strumieniem `cout` pomaga opróżnić wyjście przed odczytem, więc komunikat może pojawić się bez ręcznego `endl`.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Pierwszy program”, oceniaj przenośność, powtarzalność budowania, jakość diagnostyki i jawne wymagania wersji standardu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Na początku wybieraj krótkie programy z jednym nowym pojęciem. Jeśli jednocześnie dodasz klasy, pliki i wielowątkowość, komunikat o błędzie będzie trudniej przypisać do przyczyny. Zmieniaj jeden warunek: poprawne imię, pusta linia, a następnie koniec wejścia. W każdym przypadku określ tekst wyjścia oraz kod zakończenia.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Nie rozwiązuj znikającego okna programu przez zależne od systemu `system("pause")`. Uruchom go w terminalu, który już jest otwarty, lub użyj ustawień debuggera. Dzięki temu obsługa wejścia pozostaje częścią zadania programu, a nie sztucznym opóźnieniem zakończenia.
 
-## Dobre praktyki
+## Ćwiczenie z odpowiedzią
 
-Czytaj pierwszy komunikat diagnostyczny, nie tylko ostatnią lawinę błędów. Kompiluj z wysokim poziomem ostrzeżeń i nie ignoruj ich bez rozumienia przyczyny. Zwracaj sensowny kod wyjścia z narzędzi CLI, błędy kieruj do `std::cerr`, a zasoby reprezentuj obiektami, których destruktory zapewniają sprzątanie.
+Dlaczego po błędzie odczytu program nie powinien wypisywać zwykłego powitania? Ponieważ nie uzyskał wymaganych danych. Wczesne `return EXIT_FAILURE` kończy tę ścieżkę i nadal niszczy lokalne obiekty. Zastąpienie go wywołaniem `std::exit` zmienia reguły sprzątania lokalnych obiektów, więc nie jest równoważną zmianą stylu.
+
+Reguły punktu wejścia i kończenia programu: [C++23, main function](https://timsong-cpp.github.io/cppwp/n4950/basic.start.main).
 
 ## Powiązane tematy
 

@@ -9,27 +9,29 @@ Kompendium opiera się przede wszystkim na tekstach normatywnych i materiałach 
 - [The Standard — Standard C++](https://isocpp.org/std/the-standard) — informacja, że bieżącą opublikowaną normą jest C++23, formalnie ISO/IEC 14882:2024.
 - [WG21](https://www.open-std.org/jtc1/sc22/wg21/) — strona grupy standaryzacyjnej, working drafts, projekty i listy zagadnień.
 - [WG21 papers](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/) — dokumenty propozycji, raporty redaktorów i mailingi.
-- [N5054 — Working Draft, Programming Languages — C++](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2026/n5054.pdf) — najnowszy publiczny working draft C++26 w mailingu WG21 dostępny podczas weryfikacji 2026-08-27.
-- [Czytelny HTML aktualnego draftu](https://eel.is/c++draft/) — wygodna prezentacja tekstu working draft; numerowaną wersję WG21 warto zachować dla trwałego cytowania.
+- [N4950 — stabilny draft C++23 w HTML](https://timsong-cpp.github.io/cppwp/n4950/) — punkt odniesienia dla bazowych reguł tego kompendium; publiczny draft nie jest oficjalną publikacją ISO.
+- [ISO/IEC 14882:2024](https://www.iso.org/standard/83626.html) — oficjalna informacja o opublikowanym standardzie C++23.
+- [WG21 P3850R0](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2026/p3850r0.pdf) — dokument z 2026 roku, którego wprowadzenie potwierdza zakończenie prac komitetu nad C++26 w Croydon w marcu 2026. Zakończenie prac, publikacja ISO i wdrożenie przez toolchainy to osobne etapy; status zweryfikowano 2026-09-05.
+- [Czytelny HTML aktualnego draftu](https://eel.is/c++draft/) — wygodna prezentacja rozwijanego tekstu; może zawierać zmiany nowsze niż baza C++23. Nie przenoś ich bez adnotacji do starszego standardu.
 - [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines) — zalecenia projektowe dotyczące m.in. lifetime, ownership, concurrency i interfaces; są wytycznymi, nie tekstem normatywnym.
 
 ## Mechanizmy języka
 
-- [Core language clauses](https://eel.is/c++draft/#language) — deklaracje, wyrażenia, klasy, szablony, wyjątki i preprocessing.
-- [Object lifetime](https://eel.is/c++draft/basic.life) — rozpoczęcie i zakończenie lifetime, transparent replacement oraz storage reuse.
-- [Memory model](https://eel.is/c++draft/intro.races) — data races, happens-before i wymagania wykonania wielowątkowego.
-- [Templates](https://eel.is/c++draft/temp) — dedukcja, instancjacja, dependent names, constraints i specialization.
-- [Coroutines](https://eel.is/c++draft/dcl.fct.def.coroutine) — transformacja funkcji korutynowej, promise oraz zawieszenie.
+- [Core language clauses](https://timsong-cpp.github.io/cppwp/n4950/#language) — deklaracje, wyrażenia, klasy, szablony, wyjątki i preprocessing.
+- [Object lifetime](https://timsong-cpp.github.io/cppwp/n4950/basic.life) — rozpoczęcie i zakończenie lifetime, transparent replacement oraz storage reuse.
+- [Memory model](https://timsong-cpp.github.io/cppwp/n4950/intro.races) — data races, happens-before i wymagania wykonania wielowątkowego.
+- [Templates](https://timsong-cpp.github.io/cppwp/n4950/temp) — dedukcja, instancjacja, dependent names, constraints i specialization.
+- [Coroutines](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct.def.coroutine) — transformacja funkcji korutynowej, promise oraz zawieszenie.
 - [Contracts support w aktualnym drafcie](https://eel.is/c++draft/support.contract) — bieżący model contracts; nie należy mieszać go ze starszą składnią eksperymentalną.
 - [Reflection w aktualnym drafcie](https://eel.is/c++draft/meta.reflection) — normatywny projekt statycznej refleksji C++26.
 
 ## Biblioteka standardowa
 
-- [Library clauses](https://eel.is/c++draft/#library) — wymagania całej biblioteki, kontenery, algorytmy, concurrency i utilities.
-- [Containers library](https://eel.is/c++draft/containers) — kontenery i ich wymagania.
-- [Algorithms library](https://eel.is/c++draft/algorithms) — algorytmy klasyczne, ranges i execution policies.
-- [Thread support library](https://eel.is/c++draft/thread) — wątki, mutexy, atomiki, futures i koordynacja.
-- [Input/output library](https://eel.is/c++draft/input.output) — strumienie, filesystem i powiązane utilities.
+- [Library clauses](https://timsong-cpp.github.io/cppwp/n4950/#library) — wymagania całej biblioteki, kontenery, algorytmy, concurrency i utilities.
+- [Containers library](https://timsong-cpp.github.io/cppwp/n4950/containers) — kontenery i ich wymagania.
+- [Algorithms library](https://timsong-cpp.github.io/cppwp/n4950/algorithms) — algorytmy klasyczne, ranges i execution policies.
+- [Thread support library](https://timsong-cpp.github.io/cppwp/n4950/thread) — wątki, mutexy, atomiki, futures i koordynacja.
+- [Input/output library](https://timsong-cpp.github.io/cppwp/n4950/input.output) — strumienie, filesystem i powiązane utilities.
 - [cppreference](https://en.cppreference.com/w/) — użyteczny, społecznościowy indeks funkcji i tabel wsparcia; źródło pomocnicze, nie norma ani oficjalna publikacja WG21.
 
 ## Toolchain i narzędzia
@@ -45,12 +47,6 @@ Kompendium opiera się przede wszystkim na tekstach normatywnych i materiałach 
 
 Najpierw ustal wersję standardu. Dla reguły języka lub biblioteki sprawdź konkretną klauzulę opublikowanej normy albo odpowiadający jej draft. Dla funkcji jeszcze nieopublikowanej zachowaj numer dokumentu i datę. Dla flagi oraz dostępności sprawdź dokumentację konkretnej wersji kompilatora i biblioteki. Na końcu potwierdź zachowanie testem na wszystkich wspieranych toolchainach; eksperyment nie zmienia jednak programu z UB w program zgodny ze standardem.
 
-## Powiązane tematy
-
-- [Standardy i implementacje](01_wprowadzenie/02_standardy_i_implementacje.md)
-- [Feature-test macros](12_wspolczesny_cpp/06_feature_test_macros_i_przenosnosc.md)
-- [C++26](zaawansowane/15_cpp26_i_nadchodzace_funkcje.md)
-
 ## Hierarchia źródeł
 
 Tekst standardu i aktualne drafty odpowiadają na pytania o język oraz bibliotekę normatywną. Dokumentacja kompilatora opisuje flagi, rozszerzenia i status implementacji. Dokumentacja platformy oraz ABI wyjaśnia calling convention, layout i symbole, a cppreference jest wysokiej jakości indeksem prowadzącym do właściwych reguł, nie formalnym zamiennikiem standardu.
@@ -65,3 +61,9 @@ pytanie o C++26               -> przyjęta propozycja + feature-test macro
 ~~~
 
 Źródło powinno podawać wersję i warstwę. Artykuł pokazujący assembly jest dowodem dla konkretnej konfiguracji, a nie ogólną gwarancją; odpowiedź forum może wskazać trop, lecz kluczową tezę trzeba sprawdzić w źródle pierwotnym lub eksperymencie kontrolnym.
+
+## Powiązane tematy
+
+- [Standardy i implementacje](01_wprowadzenie/02_standardy_i_implementacje.md)
+- [Feature-test macros](12_wspolczesny_cpp/06_feature_test_macros_i_przenosnosc.md)
+- [C++26](zaawansowane/15_cpp26_i_nadchodzace_funkcje.md)

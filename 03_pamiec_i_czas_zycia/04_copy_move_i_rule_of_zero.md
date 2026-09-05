@@ -2,7 +2,7 @@
 
 # Copy, move i rule of zero
 
-C++ ma semantykę wartości: obiekt można kopiować, przenosić, przypisywać i niszczyć zgodnie z jego funkcjami specjalnymi. Kopia tworzy niezależny stan logiczny. Przeniesienie może przejąć zasoby z obiektu źródłowego, który pozostaje ważny, ale zwykle ma nieokreślony stan opisany przez kontrakt typu.
+C++ ma semantykę wartości: obiekt można kopiować, przenosić, przypisywać i niszczyć zgodnie z jego funkcjami specjalnymi. Kopiowanie typu wartościowego powinno zachowywać jego logiczną wartość; niektóre typy, na przykład `shared_ptr`, świadomie kopiują udział w zasobie. Przeniesienie może przejąć zasoby ze źródła, a dopuszczalny stan źródła określa kontrakt typu.
 
 ~~~cpp
 #include <cassert>
@@ -34,39 +34,59 @@ Zadeklarowanie niektórych funkcji specjalnych wpływa na automatyczne generowan
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Copy, move i rule of zero”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz rozpoczęcie lifetime, ustanowienie inwariantu, przekazywanie własności lub widoku oraz zakończenie lifetime w dokładnie określonym miejscu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel storage od obiektu, właściciela od obserwatora oraz semantykę przeniesienia od zwykłego kopiowania bitów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź miejsce konstrukcji i destrukcji, graf właścicieli, ważność referencji oraz zachowanie sanitizerów. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Deklaracja `Document copy = original` tworzy nowy obiekt przez konstruktor kopiujący. Nie jest przypisaniem tylko dlatego, że zawiera znak równości. Domyślne kopiowanie klasy kopiuje kolejno bazy i pola. `string` tworzy własną wartość napisu, a `vector` kopiuje elementy do własnego bufora. Dzięki temu późniejsza modyfikacja treści kopii nie zmienia treści oryginału.
 
-Model dla tej części kompendium jest następujący: Poprawność pamięci w C++ wynika z czasu życia obiektów i własności zasobów. Adres jest tylko reprezentacją położenia; nie dowodzi, że obiekt nadal istnieje ani że wolno uzyskać przez niego dostęp do przechowywanej wartości. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W `Document moved = std::move(original)` rzutowanie dostarcza xvalue, a rozstrzyganie przeciążeń może wybrać konstruktor przenoszący. Domyślny ruch klasy przenosi jej podobiekty zgodnie z ich własnymi operacjami. Dla `string` i `vector` może to oznaczać przejęcie bufora; dla pola `int` ruch zwykle ma taki sam efekt jak kopia. To nie jest mechaniczne przeniesienie wszystkich bajtów całej klasy.
+
+Przypisanie działa na obiekcie, który już istnieje. Musi uwzględnić jego dotychczasowe zasoby. Konstruktor tworzy nową tożsamość obiektu, natomiast operator przypisania zmienia stan istniejącej. Ta różnica ma znaczenie dla referencji, stałych pól, gwarancji wyjątków i samoprzypisania. Destruktor kończy odpowiedzialność za aktualny stan, bez względu na to, ile wcześniejszych przypisań wykonano.
 
 ## Pogłębienie mechanizmu
 
-- Operacja move może przejąć zasób, lecz źródło musi pozostać ważne i zniszczalne. Rule of zero preferuje człony zarządzające własnymi zasobami, dzięki czemu kompilator może poprawnie wygenerować funkcje specjalne klasy złożonej.
+Domyślny ruch nie jest automatycznie deklarowany, gdy klasa ma deklarowany przez użytkownika destruktor, konstruktor kopiujący, operator kopiujący albo operację ruchu. Nawet `~T() = default;` jest deklaracją użytkownika istotną dla tych reguł. Z kolei zadeklarowanie operacji ruchu może spowodować usunięcie domyślnych operacji kopiowania. Zawsze patrz na cały zestaw funkcji specjalnych, nie na pojedynczą dopisaną metodę.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Copy, move i rule of zero” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Nie każdy typ musi być kopiowalny. Klasa zawierająca `unique_ptr` i bez ręcznych funkcji specjalnych naturalnie jest przenoszalna, ale niekopiowalna. To też rule of zero: kompilator wyprowadza zakaz kopiowania z odpowiedzialności pola. Gdy potrzebna jest kopia logiczna, trzeba określić, czy oznacza klonowanie zasobu, współdzielenie, czy nową tożsamość.
+
+`std::move` zachowuje kwalifikację `const`. Ze stałego `string` otrzymujemy `const string&&`, które zwykle nie pasuje do konstruktora `string(string&&)`. Pozostaje konstruktor kopiujący przyjmujący `const string&`. Dodanie `std::move` nie dowodzi więc ani braku kopiowania, ani poprawy wydajności. Również `is_move_constructible` bada możliwość konstrukcji z rvalue, którą może spełnić konstruktor kopiujący.
+
+Od C++17 zwracanie prvalue tego samego typu, na przykład `return T{...};`, może konstruować bezpośrednio obiekt wynikowy bez wymogu dostępnego kopiowania lub ruchu. Zwrócenie nazwanej lokalnej zmiennej umożliwia NRVO, ale go nie gwarantuje. `return std::move(local);` zwykle odbiera tę możliwość. Najczęściej pisz `return local;` i pozwól regułom zwrotu dobrać właściwe zachowanie.
+
+`noexcept` ruchu pomaga kontenerom utrzymać gwarancje podczas przenoszenia elementów do nowego bufora. Jeśli ruch może rzucać, a kopia jest dostępna, wektor może kopiować. Dla niekopiowalnego typu z rzucającym ruchem niektóre operacje mają słabsze gwarancje. Deklarowanie nieprawdziwego `noexcept` zamienia wyjątek w zakończenie programu, więc nie jest bezpłatną optymalizacją.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Właściciel pojedynczego zasobu nie potrzebuje żadnej ręcznej funkcji specjalnej. Dostępność operacji wynika z `unique_ptr`, a przeniesione źródło ma tu konkretnie zagwarantowany stan pusty.
 
-~~~text
-Temat: Copy, move i rule of zero
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+struct Job {
+    std::unique_ptr<int> payload;
+};
+
+int main() {
+    static_assert(!std::is_copy_constructible_v<Job>);
+    static_assert(std::is_nothrow_move_constructible_v<Job>);
+    Job first{std::make_unique<int>(42)};
+    Job second = std::move(first);
+    assert(first.payload == nullptr);
+    assert(*second.payload == 42);
+    first = Job{std::make_unique<int>(9)};
+    assert(*first.payload == 9);
+}
 ~~~
-
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Copy, move i rule of zero”, oceniaj jednoznaczna własność, automatyczne sprzątanie, brak dangling i możliwie mała liczba ręcznych operacji na pamięci. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Nie narzucaj zasady „po ruchu wszystko jest puste” dowolnym klasom. Standardowe typy biblioteczne zwykle gwarantują stan ważny, ale nieokreślony, o ile nie podano mocniejszego warunku; własny typ wymaga własnego kontraktu. Dla `unique_ptr` pustość po zwykłej konstrukcji przenoszącej jest określona. Dla dowolnego typu należy sprawdzić, które operacje mają spełnione preconditions.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Klasa ma `std::vector<int>` jako jedyne pole. Dopisano destruktor tylko po to, aby wypisać komunikat. Czy automatycznie zachowała taki sam zestaw operacji ruchu?
+
+**Odpowiedź.** Nie. Deklaracja destruktora blokuje domyślne deklarowanie ruchu. Konstrukcja z rvalue może nadal działać przez kopiowanie. Należy usunąć zbędny destruktor albo świadomie zadeklarować potrzebne operacje i sprawdzić ich semantykę, zamiast wnioskować z samej kompilowalności wywołania.
+
+Źródła: [konstrukcja kopiująca i przenosząca](https://timsong-cpp.github.io/cppwp/n4950/class.copy.ctor), [eliminacja kopiowania](https://timsong-cpp.github.io/cppwp/n4950/class.copy.elision), [stan po przeniesieniu biblioteki](https://timsong-cpp.github.io/cppwp/n4950/lib.types.movedfrom).
 
 ## Powiązane tematy
 

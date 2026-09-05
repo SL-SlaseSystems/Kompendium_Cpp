@@ -35,43 +35,66 @@ Kontrakty językowe były proponowane i zmieniały się w toku standaryzacji. Ni
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Assertions, preconditions i contracts”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wykrycie niespełnionego warunku, zbudowanie informacji o błędzie, propagację przez granice oraz odtworzenie prawidłowego stanu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd możliwy do obsłużenia od naruszenia precondition i zagwarantuj sprzątanie niezależnie od wybranej ścieżki. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ błędu, zachowany kontekst, stan obiektów po porażce i spełniony poziom exception safety. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Projektowanie kontraktu zaczyna się od określenia legalnych wejść. Średnia pustego zakresu nie ma zwykłej wartości liczbowej, dlatego pierwszy przykład zwraca `nullopt`. To spodziewany wynik, nie błąd pamięci. Dla niepustego zakresu funkcja sumuje liczby i zwraca iloraz. Odrębnym warunkiem tego prostego wariantu jest reprezentowalność sumy w `long long`: bardzo długi zakres dużych wartości może go przekroczyć. Szerszy akumulator ogranicza ryzyko, lecz nie stanowi kompletnego dowodu dla dowolnego wejścia.
 
-Model dla tej części kompendium jest następujący: Obsługa błędów zaczyna się od klasyfikacji niepowodzenia: naruszenie kontraktu programisty, spodziewany brak wyniku, błąd środowiska albo awaria uniemożliwiająca kontynuację. Mechanizm raportowania powinien odpowiadać tej kategorii. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Następnie wybierz miejsce sprawdzenia. Dane od użytkownika trzeba walidować w kodzie wykonywanym także w wersji produkcyjnej. Wewnątrz programu można wykorzystać fakt, że konstruktor już zweryfikował wartość i przechowuje ją w typie utrzymującym inwariant. Powtarzanie kosztownego sprawdzenia na każdym poziomie nie jest konieczne, jeżeli publiczne operacje nie pozwalają złamać tego zapewnienia.
+
+Na końcu określ zachowanie porażki. Funkcja może zwrócić expected, rzucić wyjątek lub zakończyć proces przy wewnętrznej niespójności. Sam opis „argument musi być dodatni” nie mówi jeszcze, czy błędny argument jest diagnozowany. Dla własnego API dokumentuj to jawnie. Wymagania funkcji standardowej odczytuj z jej specyfikacji; obecność sprawdzeń w jednej bibliotece w trybie debug nie tworzy dodatkowej gwarancji języka.
 
 ## Pogłębienie mechanizmu
 
-- Assertion wykrywa założenie programisty w konfiguracji, w której jest aktywne; nie zastępuje walidacji niezaufanego wejścia. Precondition należy udokumentować tak, aby wywołujący mógł je spełnić przed wejściem do funkcji.
+`assert(condition)` ocenia warunek tylko wtedy, gdy asercje są aktywne. Przy zdefiniowanym `NDEBUG` wyrażenie nie jest wykonywane, więc `assert(queue.pop())` zmienia zachowanie programu między konfiguracjami. Właściwa postać oddziela operację od kontroli jej wyniku. Warunek diagnostyczny powinien być obserwacją już istniejącego stanu, bez niezbędnego zapisu, odczytu pliku ani zmiany licznika.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Assertions, preconditions i contracts” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`static_assert` sprawdza wyrażenie stałe podczas kompilacji i nie zależy od `NDEBUG`. Nadaje się do właściwości typów, rozmiarów ustalonych w kompilacji i konfiguracji szablonów. Nie sprawdzi numeru portu przeczytanego z sieci. Concepts także filtrują interfejs na podstawie typów i poprawności wyrażeń, lecz nie dowodzą, że komparator jest przechodni albo że użytkownik nie zniszczy bufora pod widokiem.
+
+C++23 `[[assume(condition)]]` jest założeniem przekazanym implementacji, a nie mechanizmem sprawdzania. Wyrażenie nie jest normalnie wykonywane, a naruszenie założenia prowadzi do undefined behavior. Nie używaj go do zastąpienia walidacji bezpieczeństwa. Kompilator może wykorzystać założenie do usunięcia gałęzi, przez co błędne wejście będzie działać jeszcze mniej przewidywalnie.
+
+Klasy powinny odzyskiwać inwariant przed przekazaniem sterowania klientowi. Wewnętrzna operacja może przejściowo zmieniać kilka pól, ale wyjątek nie może pozostawić publicznie dostępnego obiektu w stanie niezgodnym z zadeklarowaną gwarancją. Dlatego kontrakty łączą się bezpośrednio z RAII i exception safety, a nie są jedynie komentarzami dopisywanymi do sygnatur.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Fabryka waliduje liczbę raz i zwraca typ, którego zwykłe publiczne operacje nie umożliwiają utworzenia portu spoza zakresu. Asercja pozostaje narzędziem testowym.
 
-~~~text
-Temat: Assertions, preconditions i contracts
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <optional>
+
+class Port {
+    int value_;
+    explicit Port(int value) : value_(value) {}
+public:
+    static std::optional<Port> make(int value) {
+        if (value < 1 || value > 65535) return std::nullopt;
+        return Port{value};
+    }
+    int value() const noexcept { return value_; }
+};
+
+int connect_to(Port port) {
+    return port.value(); // miejsce właściwej operacji sieciowej
+}
+
+int main() {
+    const auto port = Port::make(443);
+    assert(port && connect_to(*port) == 443);
+    assert(!Port::make(0));
+    assert(!Port::make(65536));
+    static_assert(sizeof(int) >= 2);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Nie jest potrzebny setter przyjmujący dowolne `int`, ponieważ zniszczyłby zapewnienie typu. Kopiowanie poprawnego Port zachowuje inwariant. Przykład wymaga, aby implementacyjny `int` reprezentował używane stałe; w API przenoszącym dokładnie 16 bitów warto rozważyć odpowiedni typ bez znaku wraz z walidacją przed zawężeniem. Walidowanie dopiero po rzutowaniu mogłoby zaakceptować zawiniętą liczbę.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Assertions, preconditions i contracts”, oceniaj częstotliwość błędu, koszt ścieżki sukcesu, możliwość pominięcia wyniku, zgodność z RAII i czytelność kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Silny typ opłaca się, gdy sprawdzana własność przechodzi przez wiele funkcji. Dla pojedynczego użycia prosty warunek może być czytelniejszy. Asercje wykrywają pomyłki autora, walidacja obsługuje legalnie błędne dane zewnętrzne, a statyczne ograniczenia usuwają część pomyłek jeszcze przed uruchomieniem. C++23 nie zawiera osobnej składni językowych contracts; przykłady nie zakładają późniejszych rozwiązań.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `assert(index < size); return data[index];` jest kompletną bezpieczną obsługą indeksu przesłanego przez użytkownika? **Odpowiedź:** nie. Po wyłączeniu asercji brak kontroli granicy. Potrzebny jest zwykły warunek lub sprawdzające API, a wybrany sposób zgłaszania porażki powinien należeć do kontraktu funkcji.
+
+Źródła reguł: [C++23: assert](https://timsong-cpp.github.io/cppwp/n4950/assertions), [static_assert](https://timsong-cpp.github.io/cppwp/n4950/dcl.pre), [atrybut assume](https://timsong-cpp.github.io/cppwp/n4950/dcl.attr.assume).
 
 ## Powiązane tematy
 
 - [optional i expected](03_optional_expected_i_kody_bledow.md)
 - [Enkapsulacja](../04_klasy_i_model_obiektowy/01_struct_class_i_enkapsulacja.md)
 - [C++26](../zaawansowane/15_cpp26_i_nadchodzace_funkcje.md)
-

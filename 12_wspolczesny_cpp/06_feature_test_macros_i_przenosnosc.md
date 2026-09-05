@@ -28,39 +28,62 @@ Przenośność obejmuje także endianess, szerokości typów, alignment, ABI, fi
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Feature-test macros i przenośność”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz identyfikację wymaganej funkcji, sprawdzenie feature-test macro, wybór implementacji i weryfikację na wszystkich wspieranych toolchainach. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wersję języka ustawioną flagą od faktycznej implementacji funkcji i dostępności odpowiedniego komponentu biblioteki standardowej. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wartość makra funkcji, wynik kompilacji minimalnego przykładu, status implementacji i test na najstarszym wspieranym narzędziu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Najpierw określ konkretną funkcję i wymaganą rewizję, na przykład `byteswap` lub operacje monadyczne `optional`. Następnie włącz odpowiedni nagłówek albo `<version>`, sprawdź makro i wybierz implementację. Warunek powinien obejmować również użycie nazwy, która może nie istnieć. Zwykłe `if` wewnątrz funkcji nie usuwa nieznanej nazwy z analizy kompilatora.
 
-Model dla tej części kompendium jest następujący: Edycje standardu dodają język i bibliotekę, lecz ich obecność w dokumencie nie oznacza kompletnego wsparcia toolchainu. Kod produkcyjny potrzebuje macierzy kompilator–biblioteka–platforma oraz polityki fallbacku. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Zamknij wybór w małym adapterze. Kod domenowy wywołuje jedną funkcję i nie zna liczby obsługiwanych wersji biblioteki. Dodaj konfigurację wymuszającą fallback nawet na nowym toolchainie, aby móc go regularnie testować. W przeciwnym razie warstwa zgodności może pozostać niekompilowana przez lata.
 
 ## Pogłębienie mechanizmu
 
-- Makro feature-test ma wartość wersjonującą konkretną funkcję języka lub biblioteki. Sprawdzanie wyłącznie `__cplusplus` jest zbyt grube, gdy implementacja wspiera edycję standardu częściowo.
+Makra językowe informują o mechanizmie kompilatora, a biblioteczne o odpowiednim API biblioteki. To dwa niezależne składniki konfiguracji. `__has_include(<header>)` wykrywa dostępność nagłówka w ścieżkach wyszukiwania, lecz nie dowodzi kompletności implementacji jego zawartości. Nagłówek może istnieć w bibliotece, która jeszcze nie udostępnia wszystkich potrzebnych typów lub metod.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Feature-test macros i przenośność” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Wartości makr mają postać liczbową przypominającą rok i miesiąc rewizji. Przyjmij `>=` konkretnego progu, zamiast wymagać równości: późniejsza implementacja może obsługiwać rozszerzoną rewizję. Nigdy nie definiuj ręcznie standardowego makra, aby „włączyć” brakujące API. Deklaracja liczby nie dostarcza implementacji.
+
+`if constexpr` służy do wyborów semantycznych w kodzie, zwłaszcza zależnych od parametrów szablonu. `#if` usuwa tokeny przed kompilacją i nadaje się do odcięcia nieistniejącego nagłówka lub nieobsługiwanej składni. `requires` pozwala pytać o poprawność zależnych wyrażeń, ale nie jest uniwersalnym sposobem ukrywania dowolnej nieznanej nazwy spoza zależnego kontekstu.
+
+Konfiguracja wpływa też na ODR i ABI. Jeśli makro zmienia pola publicznej klasy, a różne jednostki translacji widzą różne wartości, program może zawierać sprzeczne definicje. Preferuj wybór implementacji za stabilnym interfejsem; gdy różnica musi być publiczna, propaguj ją jako część wymagań targetu i pakietu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <bit>
+#include <cassert>
+#include <climits>
+#include <cstdint>
+#include <version>
 
-~~~text
-Temat: Feature-test macros i przenośność
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+static_assert(CHAR_BIT == 8, "Adapter wymaga bajtow 8-bitowych");
+
+constexpr std::uint32_t reverse_bytes(std::uint32_t value) noexcept {
+#if !defined(COMPENDIUM_FORCE_PORTABLE) && defined(__cpp_lib_byteswap) && __cpp_lib_byteswap >= 202110L
+    return std::byteswap(value);
+#else
+    return ((value & 0x000000ffu) << 24)
+         | ((value & 0x0000ff00u) << 8)
+         | ((value & 0x00ff0000u) >> 8)
+         | ((value & 0xff000000u) >> 24);
+#endif
+}
+
+int main() {
+    static_assert(reverse_bytes(0x01020304u) == 0x04030201u);
+    static_assert(reverse_bytes(reverse_bytes(0xaabbccddu)) == 0xaabbccddu);
+    assert(reverse_bytes(0u) == 0u);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Adapter wymaga dostępności dokładnego typu `uint32_t` oraz ośmiobitowego bajtu. Samo istnienie `uint32_t` nie zapewnia `CHAR_BIT == 8`: bez dodatkowego warunku biblioteczne odwracanie bajtów mogłoby nie odpowiadać czterem oktetom fallbacku. Obie gałęzie realizują tę samą permutację czterech bajtów; nie wybierają automatycznie porządku sieciowego względem natywnej endianowości. Przykład kompiluj normalnie oraz z `-DCOMPENDIUM_FORCE_PORTABLE`, aby objąć kontrolą również fallback. Wymuszenie jest prywatnym makrem projektu, więc nie fałszuje informacji biblioteki.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Feature-test macros i przenośność”, oceniaj wartość funkcji dla projektu, dojrzałość implementacji, koszt fallbacku, wpływ na ABI oraz termin wsparcia toolchainu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj feature-test macro dla standaryzowanego mechanizmu, a próbę kompilacji i linkowania dla zależności wymagającej dodatkowego runtime lub nietypowego połączenia flag. Test wykonania stosuj tam, gdzie istotny jest stan środowiska: baza stref czasowych, system plików lub uprawnienia. Dla cross-compilation test uruchomienia nie musi być dostępny na komputerze budującym, co wymaga jawnej konfiguracji docelowej.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Macierz CI powinna reprezentować rzeczywiste deklarowane wsparcie. Kilka niemal identycznych kompilatorów na jednej platformie nie sprawdzi różnic systemowego ABI i kodowania ścieżek. Z drugiej strony utrzymywanie szerokiej macierzy bez użytkowników też ma koszt. Dokumentuj minimalne wersje i warunki, które sprawdzasz, aby odbiorca wiedział, co oznacza „przenośny”.
+
+## Ćwiczenie z odpowiedzią
+
+Nagłówek istnieje, makro ma zbyt niską wartość, a prosty fragment kodu przypadkiem się kompiluje. Czy możesz usunąć warunek wersji? Dopiero po ustaleniu, jakiej konkretnej rewizji wymaga pełny kod. Jeden przechodzący overload nie dowodzi kompletności późniejszego rozszerzenia. Bezpieczniej testować dokładne wymagane operacje i utrzymać udokumentowany próg.
+
+Źródło listy makr C++23: [version synopsis](https://timsong-cpp.github.io/cppwp/n4950/version.syn). Rozszerzenia kompilatora opisuje osobno [Clang Language Extensions](https://clang.llvm.org/docs/LanguageExtensions.html).
 
 ## Powiązane tematy
 

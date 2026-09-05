@@ -2,7 +2,7 @@
 
 # Value semantics i type erasure
 
-Typ ma value semantics, gdy jego kopia zachowuje się jak niezależna wartość, porównanie opisuje znaczenie logiczne, a zasoby są szczegółem implementacji. `std::string` i `std::vector` są typowymi przykładami. Value semantics upraszcza lokalne rozumowanie, testy i współbieżność, bo ownership jest jasny.
+Typ ma value semantics, gdy jego kopia zachowuje się jak niezależna wartość, udostępnione porównanie opisuje znaczenie logiczne, a zasoby są szczegółem implementacji. `std::string` i `std::vector` są typowymi przykładami. Value semantics upraszcza lokalne rozumowanie, testy i współbieżność, bo ownership jest jasny.
 
 ~~~cpp
 #include <cassert>
@@ -33,43 +33,66 @@ int main() {
 
 Alternatywy mają inne koszty. Template parametr zachowuje typ statyczny i pozwala inline, ale rozprzestrzenia implementację do nagłówków. Wirtualna hierarchia współdzieli kontrakt przez dziedziczenie. `variant` ma zamknięty zbiór typów i wyczerpujący visitor. Ręczny erasure może obsługiwać move-only wartości, niestandardową alokację i konkretny ABI, lecz łatwo popełnić błąd lifetime.
 
-Nie myl value semantics z kopiowalnością za wszelką cenę. Typ reprezentujący pojedynczy uchwyt może być move-only. Ważne, by operacje odpowiadały znaczeniu domenowemu i nie ujawniały przypadkowego współdzielenia.
+Typ reprezentujący pojedynczy uchwyt może celowo być move-only i mieć jasną semantykę własności, choć nie oferuje pełnej semantyki regularnej wartości obejmującej kopiowanie. Ważne, by operacje odpowiadały znaczeniu domenowemu i nie ujawniały przypadkowego współdzielenia.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Value semantics i type erasure”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz ustanowienie kontraktu typu, rozdzielenie interfejsu od implementacji, wykonanie operacji i zmierzenie kosztu na granicy abstrakcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie domenowe od mechanizmu implementacyjnego, publiczne ABI od prywatnego layoutu i hipotezę wydajności od pomiaru. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź przykładowe użycie API, rozmiar i layout typu, symbole biblioteki, profil CPU oraz liczbę alokacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Przy type erasure konkretny obiekt trafia do wrappera, który zachowuje sposób wykonania ustalonego zestawu operacji. Klient widzi sygnaturę, na przykład `string(int)`, a ukryta implementacja wie, jak wywołać dany typ lambdy, przenieść go, skopiować i zniszczyć. Nie trzeba modyfikować klasy lambdy ani dodawać jej wspólnej bazy.
 
-Model dla tej części kompendium jest następujący: Projektowanie C++ łączy semantykę wartości, własność, stabilność ABI i koszt abstrakcji. Dobra abstrakcja utrudnia niewłaściwe użycie, ale pozostawia kompilatorowi wystarczającą informację do optymalizacji. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Gdy kopiujesz `std::function`, kopiowany jest przechowywany cel zgodnie z jego konstruktorem kopiującym. Jeśli cel zawiera `int`, dostajesz kopię liczby. Jeśli zawiera `shared_ptr`, kopiujesz współwłasność tego samego obiektu. Sam fakt, że wrapper jest kopiowalny, nie dowodzi niezależności wszystkich danych osiągalnych przez kopię.
 
 ## Pogłębienie mechanizmu
 
-- Value semantics oznacza, że kopia reprezentuje niezależną wartość z przewidywalną równością. Type erasure ukrywa konkretny typ za wspólnym kontraktem przez wskaźnik funkcji, vtable lub mały bufor.
+Value semantics opisuje zachowanie logiczne, a nie konkretny layout. Dwie wartości mogą współdzielić niemodyfikowalne dane implementacji i nadal zachowywać się niezależnie z perspektywy klienta. Odwrotnie, dwa różne obiekty posiadające wskaźniki do jednego modyfikowalnego stanu mogą wzajemnie wpływać na swoje wyniki. W analizie kopii pytaj, co może zaobserwować użytkownik po zmianie jednej wartości.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Value semantics i type erasure” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Type erasure może być realizowane za pomocą wskaźników do funkcji, wirtualnej hierarchii pomocniczej albo innego mechanizmu. Standard określa kontrakt `std::function`, a nie jeden obowiązkowy układ tablicy operacji. Small-buffer optimization ogranicza część alokacji, lecz jej próg i warunki są zależne od implementacji. Utrzymywanie stabilnego ABI ręcznego wrappera wymaga kontroli nad znacznie większą liczbą szczegółów niż tylko rozmiar bufora.
+
+Pusty `std::function` jest legalnym stanem, ale jego wywołanie zgłasza `bad_function_call`. `std::move_only_function` z C++23 obsługuje niekopiowalne cele i bogatsze kwalifikacje sygnatury; ma też własny kontrakt wywołania pustego stanu, którego nie należy utożsamiać z `std::function`. Wrapper powinien precyzyjnie określać, czy pustość jest dozwolona i jak klient ma ją sprawdzać.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <functional>
+#include <memory>
 
-~~~text
-Temat: Value semantics i type erasure
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    std::function<int()> shared = [state = std::make_shared<int>(0)] {
+        return ++*state;
+    };
+    auto shared_copy = shared;
+    const int first = shared();
+    const int second = shared_copy();
+    assert(first == 1 && second == 2);
+
+    std::function<int()> independent = [state = 0]() mutable {
+        return ++state;
+    };
+    auto independent_copy = independent;
+    const int left = independent();
+    const int right = independent_copy();
+    assert(left == 1 && right == 1);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+W obu przypadkach wrapper i lambda zostały skopiowane. Różnica wynika z pola zamknięcia: współdzielony wskaźnik wskazuje ten sam licznik, a zwykły `int` przechowuje osobną wartość. Współdzielenie wpływa także na wymagania synchronizacji, gdy kopie są używane w różnych wątkach. Licznik referencji `shared_ptr` nie zabezpiecza inkrementacji samego `int`.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Value semantics i type erasure”, oceniaj łatwość poprawnego użycia, value semantics, stabilność kontraktu, koszt kompilacji i zmierzona wydajność krytycznej ścieżki. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+| Mechanizm | Kiedy pasuje | Najważniejsza konsekwencja |
+|---|---|---|
+| Parametr szablonu | Konkretny typ znany w kompilacji | Dobre możliwości inline, większy zasięg implementacji w nagłówkach. |
+| Funkcja wirtualna | Otwarta hierarchia ze wspólnym interfejsem | Jawna tożsamość obiektów i kontrakt dziedziczenia. |
+| `variant` | Znany, zamknięty zbiór alternatyw | Dodanie typu zmienia zbiór obsługiwanych przypadków. |
+| Type erasure | Jednolity interfejs dla niezależnych typów | Koszt pośrednictwa i własna polityka przechowywania. |
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Przy pojedynczym wywołaniu nie zawsze trzeba przechowywać callback w `std::function`. Szablon przyjmujący callable może uniknąć konwersji i zachować jego typ. Erasure jest przydatne, gdy callback musi przejść przez stabilną granicę albo różne typy operacji mają być przechowywane w jednym kontenerze.
+
+## Ćwiczenie z odpowiedzią
+
+Czy `const std::function<int()>` gwarantuje niezmienność ukrytego stanu? Nie: kwalifikacja wrappera nie jest obietnicą czystości celu; przechowywana operacja może modyfikować własny lub współdzielony stan. Jeśli API wymaga braku skutków ubocznych, potrzebuje kontraktu semantycznego, którego sama nazwa typu nie zapewnia.
+
+Źródło kontraktów wrapperów: [C++23, polymorphic function wrappers](https://timsong-cpp.github.io/cppwp/n4950/func.wrap).
 
 ## Powiązane tematy
 

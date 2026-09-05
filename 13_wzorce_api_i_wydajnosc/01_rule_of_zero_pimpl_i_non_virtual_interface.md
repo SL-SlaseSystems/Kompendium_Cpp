@@ -8,6 +8,8 @@ PImpl (*pointer to implementation*) przenosi prywatną reprezentację do niekomp
 
 ~~~cpp
 #include <cassert>
+#include <limits>
+#include <stdexcept>
 
 class Processor {
 public:
@@ -20,8 +22,8 @@ public:
 
 private:
     static void validate(int value) {
-        if (value < 0) {
-            throw "negative";
+        if (value < 0 || value > std::numeric_limits<int>::max() / 2) {
+            throw std::out_of_range("value outside supported range");
         }
     }
     virtual int do_process(int value) = 0;
@@ -42,44 +44,76 @@ Non-Virtual Interface (NVI) udostępnia publiczną niewirtualną metodę pilnuj�
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Rule of zero, PImpl i Non-Virtual Interface”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz ustanowienie kontraktu typu, rozdzielenie interfejsu od implementacji, wykonanie operacji i zmierzenie kosztu na granicy abstrakcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie domenowe od mechanizmu implementacyjnego, publiczne ABI od prywatnego layoutu i hipotezę wydajności od pomiaru. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź przykładowe użycie API, rozmiar i layout typu, symbole biblioteki, profil CPU oraz liczbę alokacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Najpierw oddziel odpowiedzialność domenową od własności zasobu. Klasa opisująca dokument powinna przechowywać `string` i `vector`, a nie samodzielnie odtwarzać ich alokację i kopiowanie. Jeżeli potrzebujesz ukryć reprezentację przed klientem biblioteki, umieść ją w osobnej klasie implementacyjnej i pozostaw w publicznej klasie właściciela tej implementacji.
 
-Model dla tej części kompendium jest następujący: Projektowanie C++ łączy semantykę wartości, własność, stabilność ABI i koszt abstrakcji. Dobra abstrakcja utrudnia niewłaściwe użycie, ale pozostawia kompilatorowi wystarczającą informację do optymalizacji. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy PImpl deklaracja zagnieżdżonego `Impl` wystarcza, aby zadeklarować `unique_ptr<Impl>`. Domyślny deleter wymaga jednak kompletnego typu tam, gdzie realizowane jest usuwanie. Dlatego definicję destruktora umieszcza się w pliku implementacji po definicji `Impl`. W praktyce także konstruktor i odpowiednie operacje przenoszenia definiuj w miejscu z pełną reprezentacją, aby ścieżki sprzątania były poprawne.
+
+W NVI wywołanie klienta trafia najpierw do niewirtualnego interfejsu. Ten sprawdza dane i wspólne warunki, a dopiero potem wywołuje wirtualny etap specjalistyczny. Klasa pochodna dostarcza operację, ale nie omija normalną drogą kontroli na wejściu.
 
 ## Pogłębienie mechanizmu
 
-- Wirtualne wywołanie działa przez dynamiczny typ obiektu, ale podczas konstruktora i destruktora dispatch nie przechodzi do bardziej pochodnej części. Polimorficzna baza przeznaczona do usuwania przez wskaźnik bazowy potrzebuje wirtualnego destruktora.
-- PImpl przenosi reprezentację za granicę typu niekompletnego, zmniejszając zależności i chroniąc ABI kosztem alokacji oraz indirection. NVI pozostawia wirtualny punkt rozszerzenia prywatny, a publiczna metoda pilnuje kontraktu.
+Rule of zero nie jest nakazem bezwzględnego braku destruktorów. Wrapper PImpl często potrzebuje jawnej deklaracji destruktora dla niekompletnego typu. To z kolei wpływa na automatyczne generowanie operacji przenoszenia. Jeśli typ ma być move-only, zadeklaruj ten kontrakt świadomie i sprawdź, czy użytkownik może legalnie przechowywać go w kontenerze.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Rule of zero, PImpl i Non-Virtual Interface” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+PImpl nie zapewnia głębokiej kopii automatycznie. `unique_ptr` usuwa kopiowanie; jeśli obiekt domenowy ma być kopiowalny, musisz określić, jak skopiować `Impl` oraz jak zachować gwarancję wyjątków przypisania. Zmiana właściciela na `shared_ptr` zmienia semantykę na współdzielenie i nie jest neutralnym sposobem przywrócenia kopiowalności.
+
+PImpl ogranicza zależności reprezentacji i może zachować rozmiar publicznej klasy przy zmianach prywatnych pól implementacji. Nie stabilizuje sam z siebie nazw eksportowanych funkcji, konwencji wywołania, polityki wyjątków ani ABI standardowego typu użytego w sygnaturze. Stabilność binarna wymaga określonego środowiska i zakresu dozwolonych zmian.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniżej część deklaracyjna i implementacyjna znajdują się w jednej jednostce, aby przykład można było skompilować samodzielnie. W projekcie rozdziela się je na nagłówek i plik `.cpp`.
 
-~~~text
-Temat: Rule of zero, PImpl i Non-Virtual Interface
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+class Widget {
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+public:
+    explicit Widget(std::string label);
+    ~Widget();
+    Widget(Widget&&) noexcept;
+    Widget& operator=(Widget&&) noexcept;
+    Widget(const Widget&) = delete;
+    Widget& operator=(const Widget&) = delete;
+    std::string label() const;
+};
+
+struct Widget::Impl { std::string label; };
+Widget::Widget(std::string label) : impl_{std::make_unique<Impl>(Impl{std::move(label)})} {}
+Widget::~Widget() = default;
+Widget::Widget(Widget&&) noexcept = default;
+Widget& Widget::operator=(Widget&&) noexcept = default;
+std::string Widget::label() const {
+    if (!impl_) throw std::logic_error("Widget bez implementacji po przeniesieniu");
+    return impl_->label;
+}
+
+int main() {
+    Widget first{"panel"};
+    Widget second{std::move(first)};
+    assert(second.label() == "panel");
+    first = Widget{"odtworzony"};
+    assert(first.label() == "odtworzony");
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Po przeniesieniu `first` może być zniszczony i przypisany ponownie. Wywołanie `label` ma jawnie określony błąd dla pustej implementacji. Zwracanie napisu przez wartość usuwa zależność czasu życia wyniku od `Widget`, kosztem możliwej kopii.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Rule of zero, PImpl i Non-Virtual Interface”, oceniaj łatwość poprawnego użycia, value semantics, stabilność kontraktu, koszt kompilacji i zmierzona wydajność krytycznej ścieżki. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Stosuj rule of zero w typach wartościowych, PImpl na granicy wymagającej ukrycia reprezentacji, a NVI tam, gdzie rozszerzenia mają przechodzić przez wspólny kontrakt. To trzy rozwiązania różnych problemów; nie trzeba wprowadzać ich jednocześnie do każdej klasy. Dla małej struktury punktu dwuwymiarowego PImpl zwykle zwiększa koszt i złożoność bez istotnej korzyści.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Wirtualny customization point może rzucać albo otrzymać dodatkowe ograniczenia. Wspólny wrapper musi określać także stan obiektu po błędzie, a nie tylko wykonywać walidację przed wywołaniem. Wywoływanie wirtualnego etapu z konstruktora nie uruchamia automatycznie zachowania jeszcze nieskonstruowanej części pochodnej.
 
-## Dobre praktyki
+## Ćwiczenie z odpowiedzią
 
-Wybierz PImpl z powodu czasu budowania lub stabilności granicy, nie jako automatyczny wzorzec. Najpierw wybieraj kompozycję i typy wartościowe. Hierarchie powinny mieć jeden jasny wymiar zmienności, a klasa bazowa musi dokumentować ownership i destrukcję.
+Dlaczego domyślne `= default` przy destruktorze w publicznym nagłówku może sprawiać problem z PImpl? Jego instancjacja może wymagać wywołania deletera, gdy `Impl` jest nadal niekompletne. Sama możliwość zadeklarowania wskaźnika do niekompletnego typu nie dowodzi możliwości usunięcia wskazywanego obiektu w tym miejscu.
+
+Źródło wymagań deletera: [C++23, default_delete](https://timsong-cpp.github.io/cppwp/n4950/unique.ptr.dltr.dflt). Idiomy projektowe nie są odrębnymi słowami kluczowymi języka.
 
 ## Powiązane tematy
 

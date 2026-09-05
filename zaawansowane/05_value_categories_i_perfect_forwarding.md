@@ -32,39 +32,61 @@ Perfect forwarding nie jest idealne we wszystkich przypadkach: initializer lists
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Value categories i perfect forwarding”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Dla `forward_to_consume(text)` dedukcja rozpoznaje argument lvalue. Parametr szablonu `T` staje się `std::string&`, a zapis `T&&` po reference collapsing oznacza `std::string&`. `std::forward<T>(value)` odtwarza lvalue i wybrana zostaje funkcja przyjmująca `const std::string&`. Nie ma przeniesienia zasobu ani utworzenia dodatkowego napisu.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Dla `forward_to_consume(std::move(text))` argument jest xvalue, więc `T` to `std::string`. Parametr ma typ `std::string&&`, ale jego nazwa nadal jest wyrażeniem lvalue. Dopiero `std::forward<T>` produkuje xvalue, które może związać się z drugim przeciążeniem. Samo wywołanie funkcji przyjmującej rvalue reference jeszcze nie zmienia napisu; trzeba rzeczywiście wykonać operację, która wykorzystuje tę zgodę, na przykład skonstruować inny `string`.
 
 ## Pogłębienie mechanizmu
 
-- Lvalue oznacza wyrażenie z tożsamością, xvalue zasób możliwy do ponownego użycia, a prvalue inicjalizuje wynik. Forwarding reference wraz z `std::forward` zachowuje kategorię argumentu po dedukcji.
+Kategorie wartości opisują wyrażenia, nie trwałą etykietę zmiennej. Zmienna zadeklarowana jako `T&&` ma nazwę będącą lvalue. Wywołanie funkcji zwracającej `T&` jest lvalue, zwracającej `T&&` jest xvalue, a zwracającej `T` zwykle prvalue. `decltype((expr))` koduje tę różnicę jako odpowiednio `T&`, `T&&` albo `T`; pojedyncze, nieujęte w nawiasy użycie nazwy ma szczególną regułę `decltype` i zwraca deklarowany typ.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Value categories i perfect forwarding” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Od C++17 prvalue klasy może bezpośrednio inicjalizować obiekt docelowy, bez wcześniejszej „tymczasowej kopii”. Dlatego `return T{...};` może działać dla typu niekopiowalnego i nieprzenoszalnego. NRVO dla nazwanej zmiennej lokalnej jest inną, opcjonalną optymalizacją. Dodanie `std::move(local)` odbiera takiej instrukcji powrotu postać wymaganą dla NRVO i zwykle nie przynosi oczekiwanej korzyści.
+
+Forwarding reference wymaga cv-niekwalifikowanego parametru typu dedukowanego dla danego wywołania. `const T&&` nie jest forwarding reference. W klasie `Box<T>` parametr zwykłej metody `void set(T&&)` używa już ustalonego `T`, więc również nie spełnia tej roli. Osobny szablon metody `template<class U> void set(U&&)` może ją pełnić. `auto&&` zwykle stosuje analogiczną dedukcję, z wyjątkiem szczególnych reguł initializer lists.
+
+Przekazywanie dalej nie przedłuża lifetime. Wrapper zwracający referencję do przekazanego obiektu tymczasowego może oddać wiszącą referencję po końcu pełnego wyrażenia wywołania. Idealne zachowanie cv/ref bywa zatem niewłaściwym kontraktem API, gdy funkcja powinna zapewnić własność wyniku. Również dwukrotne użycie `forward<T>(value)` może przekazać ten sam argument do dwóch operacji konsumujących, a drugi odbiorca zobaczy już stan po przeniesieniu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <string>
+#include <type_traits>
+#include <utility>
 
-~~~text
-Temat: Value categories i perfect forwarding
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+struct Box {
+    std::string value;
+    const std::string& get() const & { return value; }
+    std::string get() && { return std::move(value); }
+};
+int main() {
+    Box box{"dane"};
+    static_assert(std::is_same_v<decltype(box.get()), const std::string&>);
+    const auto& view = box.get();
+    auto owned = Box{"wynik"}.get();
+    assert(view == "dane" && owned == "wynik");
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Metoda z kwalifikatorem `const &` udostępnia referencję do pola istniejącego obiektu. Wywołanie na tymczasowym `Box` wybiera przeciążenie `&&`, które zwraca własny `string` przez wartość. Dzięki temu `owned` przeżywa zniszczenie tymczasowego pudełka. Zwrócenie `std::string&&` zamiast wartości nie byłoby równoważne: referencja wskazywałaby pole obiektu kończącego życie.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Value categories i perfect forwarding”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Przyjmuj przez wartość, gdy funkcja potrzebuje swojej kopii i zwykle ją zachowa. Użyj `const T&` do synchronicznego odczytu, a konkretnego `T&&` do jednoznacznej operacji konsumującej. Forwarding reference sprawdza się w fabryce lub adapterze wywołania, lecz znacznie rozszerza zbiór kandydatów i może przechwycić wywołanie oczekiwane dla copy constructor. Ograniczaj takie konstruktory conceptami i wykluczaj własny typ, gdy wymaga tego projekt.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Co otrzymuje typowy konstruktor po `std::move(const_string)`? **Odpowiedź:** `const std::string&&`, który nie pasuje do modyfikowalnego parametru move constructor; zwykle następuje kopia przez `const&`. Czy `std::forward<int>(named_int)` zawsze jest właściwe? Nie: jawne `int` wymusza xvalue, choć pierwotny argument mógł być lvalue. Szablon musi używać parametru wynikającego z rzeczywistej dedukcji.
+
+Źródła: [N4950: kategorie wartości](https://timsong-cpp.github.io/cppwp/n4950/basic.lval) i [dedukcja argumentów wywołania](https://timsong-cpp.github.io/cppwp/n4950/temp.deduct.call).
+
+### Dedukcja nie odtwarza składni wywołania
+
+Lista `{1, 2, 3}` nie jest zwykłym wyrażeniem o jednym typie, z którego dowolna forwarding reference potrafi wydedukować `T`. Konstruktor kontenera może obsługiwać `initializer_list`, lecz generyczna fabryka pośrednicząca w wywołaniu potrzebuje często jawnego obiektu takiej listy lub osobnego przeciążenia. Podobnie nazwa przeciążonej funkcji nie wyznacza jednej wartości, dopóki kontekst nie wybierze sygnatury. Perfect forwarding zachowuje informacje już uzyskane przez dedukcję, nie tworzy brakujących informacji.
+
+Pole bitowe również nie zachowuje się jak zwykły adresowalny obiekt przy wiązaniu referencji. Wrapper z `T&&` może odrzucić wywołanie, które bezpośrednia funkcja przyjmująca liczbę przez wartość obsłużyłaby bez problemu. W takiej sytuacji jawna kopia wartości często najlepiej wyraża intencję. Dążenie do zachowania każdej referencji może zwiększyć liczbę ograniczeń bez korzyści wydajnościowej.
+
+C++23 dodaje `std::forward_like`, które przenosi odpowiedni model cv/ref z innego typu na wyrażenie. Jest przydatne przy implementacji dostępu do pól zależnego od kategorii obiektu odbiorcy. Nie zastępuje analizy lifetime ani nie gwarantuje, że zwrócona referencja będzie bezpieczna po zniszczeniu właściciela.
+
+Dedukcja typu wyniku przez auto i decltype(auto) prowadzi do odmiennych decyzji przy proxy references. Iterator nie musi zwracać prawdziwego T&; może oddawać niewielki obiekt pośredniczący w dostępie, jak w niektórych wyspecjalizowanych kontenerach. Skopiowanie takiego proxy niekoniecznie tworzy niezależną kopię wartości. W kodzie generycznym sprawdzaj typ referencji iteratora oraz zamierzone zachowanie wyniku, zamiast utożsamiać każdy zapis auto z bezpiecznym posiadaniem danych.
 
 ## Powiązane tematy
 

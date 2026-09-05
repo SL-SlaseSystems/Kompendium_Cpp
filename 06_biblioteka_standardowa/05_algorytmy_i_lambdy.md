@@ -37,43 +37,61 @@ Algorytmy równoległe z execution policies mogą zmieniać kolejność i kontek
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Algorytmy i lambdy”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie zakresu, wykonanie operacji zgodnie z wymaganiami iteratora i aktualizację stanu kontenera wraz z regułami invalidacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij właściciela elementów od widoku, kolejność logiczną od fizycznego układu i gwarancję złożoności od konkretnego czasu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź rozmiar i capacity, ważność iteratorów, liczbę alokacji, kolejność elementów oraz klasę złożoności. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Sortowanie użytkowników otrzymuje trzy oddzielne informacje: zakres obiektów, relację `greater` i projekcję `&User::score`. Algorytm wywołuje projekcję, aby uzyskać klucze porównania, a następnie przekazuje je relacji. Dzięki temu nie trzeba pisać osobnej lambdy porównującej struktury. Obiekty są przestawiane w oryginalnym wektorze; projekcja nie tworzy osobnego wektora wyników.
 
-Model dla tej części kompendium jest następujący: Kontenery i algorytmy biblioteki standardowej mają kontrakty dotyczące złożoności, invalidacji, własności oraz zakresów. Poprawny wybór wynika z wymaganych operacji i stabilności adresów, nie z przyzwyczajenia do jednego kontenera. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`accumulate` zaczyna od wartości początkowej i aktualizuje akumulator w kolejności zakresu. Typ wartości początkowej wpływa na typ akumulatora: start od `0` oznacza `int`, nawet gdy elementy są szersze lub zmiennoprzecinkowe. Aby sumować do `double`, użyj `0.0`. Dla dużych liczb całkowitych wybierz odpowiednio szeroki typ i nadal uwzględniaj możliwość przepełnienia; szerszy typ nie daje nieograniczonej arytmetyki.
+
+Algorytm `transform` zapisujący przez iterator wyjściowy nie powiększa automatycznie kontenera. Pusty `output.begin()` nie daje miejsca do zapisu. Potrzebujesz uprzedniego `resize` albo adaptera `back_inserter`, który tłumaczy przypisanie na `push_back`. `reserve` zapewnia pamięć, lecz nie tworzy elementów. Zwracane przez ranges struktury wynikowe często zawierają końcowe pozycje wejścia i wyjścia, ułatwiając kontynuację pracy.
 
 ## Pogłębienie mechanizmu
 
-- Algorytmy oddzielają sposób przejścia od operacji na elementach. Lambda przechwytująca przez referencję dziedziczy ograniczenie lifetime, a `mutable` zmienia constness operatora wywołania, nie obiektu źródłowego.
+Lambda jest obiektem unikalnego, anonimowego typu domknięcia. Przechwycenia przez wartość stają się jego stanem. Domyślnie operator wywołania nie pozwala zmieniać tych kopii; `mutable` usuwa to ograniczenie, ale nie zamienia kopii w referencje do oryginałów. Init-capture, np. `[data = std::move(data)]`, pozwala przenieść właściciela do domknięcia. Taka lambda może być niekopiowalna, co wpływa na zgodność z odbierającym ją API.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Algorytmy i lambdy” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Algorytmy mogą kopiować obiekty funkcyjne. Nie używaj licznika przechowywanego w lokalnej kopii predykatu jako wiarygodnego raportu liczby wywołań. Również konkretna kolejność porównań w sortowaniu nie jest gwarantowana. Komparator powinien określać relację, a nie sterować logiką programu efektami ubocznymi. Dla predykatów wymagających regularnej semantyki powtarzane wywołanie dla tych samych argumentów powinno dawać ten sam wynik.
+
+`lower_bound` wymaga zakresu podzielonego względem używanej relacji; posortowanie tą samą relacją jest zwykłym sposobem spełnienia warunku. `unique` usuwa logicznie tylko sąsiadujące duplikaty. Aby usunąć wszystkie powtórzenia, często najpierw sortuje się dane, ale traci się wtedy ich pierwotną kolejność. Dobór algorytmu zaczyna się więc od oczekiwanego zachowania, a nie od nazwy brzmiącej podobnie do celu.
+
+Sprawdzaj także dopuszczalne nakładanie zakresów. Standardowe algorytmy kopiowania i transformacji nie mają jednej wspólnej reguły dla wszystkich konfiguracji wejścia i wyjścia. Przesuwanie fragmentu w prawo wymaga odpowiednio wybranego kierunku, np. `copy_backward`, aby nie nadpisywać danych przed ich odczytem. Osobną pułapką jest algorytm dopisujący do tego samego wektora, z którego czyta: realokacja może unieważnić wejściowe iteratory. Rozdzielenie kontenera wynikowego często upraszcza dowód poprawności bardziej niż skomplikowane sterowanie pojemnością.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Połączenie filtrowania i transformacji można zapisać w kilku prostych krokach bez ukrytego założenia o rozmiarze wyjścia.
 
-~~~text
-Temat: Algorytmy i lambdy
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <algorithm>
+#include <cassert>
+#include <iterator>
+#include <vector>
+
+int main() {
+    const std::vector<int> raw{3, -2, 3, 1, -1, 2};
+    std::vector<int> positive;
+    std::ranges::copy_if(raw, std::back_inserter(positive),
+                         [](int n) { return n > 0; });
+    std::ranges::sort(positive);
+    const auto duplicates = std::ranges::unique(positive);
+    positive.erase(duplicates.begin(), duplicates.end());
+
+    std::vector<int> doubled;
+    std::ranges::transform(positive, std::back_inserter(doubled),
+                           [](int n) { return 2 * n; });
+    assert((positive == std::vector<int>{1, 2, 3}));
+    assert((doubled == std::vector<int>{2, 4, 6}));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Po `unique` rozmiar wciąż wynosi cztery. Dopiero usunięcie zwróconego podzakresu skraca wektor do trzech elementów. Wynik jest posortowany, co stanowi świadomą część tego przykładu. Gdyby wymagano zachowania pierwszej kolejności wystąpień, potrzebna byłaby inna strategia, np. dodatkowy zbiór już widzianych wartości.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Algorytmy i lambdy”, oceniaj wzorzec dostępu, lokalność danych, stabilność referencji, koszt modyfikacji i możliwość użycia gotowego algorytmu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Pętla jest dobrym wyborem, gdy pojedynczy algorytm nie opisuje przepływu czytelnie, występuje kilka zależnych stanów albo potrzebujesz wczesnego zakończenia o nietypowych regułach. Algorytm daje z kolei gotowy kontrakt, deklarowaną złożoność i mniej ręcznych pozycji. Polityki równoległe stosuj dopiero po sprawdzeniu wymagań funkcji użytkownika; wyjątek z takiej funkcji dla standardowych polityk może prowadzić do `terminate`.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `reduce` może zawsze zastąpić `accumulate` dla liczb zmiennoprzecinkowych? **Odpowiedź:** nie, może inaczej grupować działania. Dodawanie zmiennoprzecinkowe nie jest matematycznie łączne w arytmetyce maszyny, więc wynik może się różnić. Wybór dotyczy również wymagań dotyczących powtarzalności, a nie tylko szybkości.
+
+Źródła reguł: [C++23: wymagania algorytmów](https://timsong-cpp.github.io/cppwp/n4950/algorithms.requirements), [domknięcia lambd](https://timsong-cpp.github.io/cppwp/n4950/expr.prim.lambda.closure), [algorytmy numeryczne](https://timsong-cpp.github.io/cppwp/n4950/numeric.ops).
 
 ## Powiązane tematy
 
 - [Iteratory](04_iteratory_i_invalidacja.md)
 - [Ranges](06_ranges_i_views.md)
 - [Współbieżność](../10_wspolbieznosc/01_thread_jthread_i_stop_token.md)
-

@@ -35,39 +35,45 @@ W CI warto kompilować co najmniej Clangiem i GCC, a kod przenośny na Windows r
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Kompilatory i toolchain”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz przejście od tekstu źródłowego przez analizę składniową i semantyczną do artefaktu wykonywalnego. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wymaganie standardu od rozszerzenia kompilatora, ustawienia toolchainu i zachowania platformy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź pełne polecenie kompilacji, wersje narzędzi, diagnostykę oraz wynik uruchomienia w kontrolowanym środowisku. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie `clang++` jest zwykle uruchomieniem sterownika, który dobiera kolejne narzędzia oraz domyślne biblioteki. Najpierw znajdź rzeczywisty plik wykonywalny i odczytaj jego wersję. Następnie zanotuj target: architekturę i system, dla których powstaje kod. Program uruchomiony na ARM może budować kod x86, jeżeli ma odpowiedni zestaw narzędzi i sysroot. To kompilacja krzyżowa, a nie automatyczna zdolność każdego pliku binarnego do pracy na obu procesorach.
 
-Model dla tej części kompendium jest następujący: Program C++ powstaje w łańcuchu źródło–kompilator–linker–środowisko wykonawcze. Standard opisuje zachowanie programu abstrakcyjnego, implementacja wybiera reprezentację i ABI, a system operacyjny dostarcza proces, pliki oraz biblioteki. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Włącz ostrzeżenia, kompiluj minimalny przykład i uruchom go. Dopiero potem dołącz bibliotekę zewnętrzną. Przy błędzie sprawdź pełne polecenie kompilacji: katalogi `-I`, definicje `-D`, standard, sysroot i ścieżki bibliotek. Plik `compile_commands.json` pozwala narzędziom analizy używać takich samych parametrów jak właściwy build. Analiza nagłówka w przypadkowej konfiguracji może produkować błędy, których nie ma w projekcie.
 
 ## Pogłębienie mechanizmu
 
-- Frontend parsuje i sprawdza język, optimizer przekształca reprezentację pośrednią, backend generuje kod, a linker scala symbole. Flagi ostrzeżeń, tryb standardu, standard library i linker są częścią reprodukowalnej konfiguracji.
+Frontend parsuje C++ i sprawdza semantykę; optimizer przekształca reprezentację pośrednią; backend generuje kod dla procesora. Biblioteka standardowa dostarcza część kodu w nagłówkach, a część w bibliotekach binarnych. Linker rozwiązuje odwołania między jednostkami. Debugger korzysta z informacji o nazwach, typach i lokalizacjach źródła. Jeden komunikat „build failed” może zatem oznaczać problemy na bardzo różnych poziomach.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Kompilatory i toolchain” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`-Wall` nie znaczy „wszystkie ostrzeżenia”. Zestawy są zależne od kompilatora i wersji. `-Werror` zamienia ostrzeżenia w błędy, co bywa przydatne dla własnego kodu w ustalonym CI, ale może utrudnić aktualizację kompilatora lub budowanie cudzych nagłówków. Traktuj ostrzeżenia z własnego kodu świadomie i ograniczaj wyciszenia do konkretnej przyczyny.
+
+Optymalizacja zmienia widoczność zmiennych w debuggerze. Obiekt może zostać usunięty, zmienna istnieć tylko w rejestrze, a funkcja zostać wstawiona do wywołującego. Brak możliwości obejrzenia zmiennej nie dowodzi błędu kompilatora. Symbole debugowania i optymalizacja są osobnymi ustawieniami: da się budować zoptymalizowany program z symbolami, co jest przydatne do profilowania rzeczywistych kosztów.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniższe polecenia dotyczą Clang/GCC w środowisku z dostępnym runtime sanitizerów; użyj pliku `main.cpp` z przykładu powyżej.
 
 ~~~text
-Temat: Kompilatory i toolchain
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+clang++ --version
+clang++ -std=c++23 -Wall -Wextra -Wpedantic -g -O0 main.cpp -o app-debug
+./app-debug Ada
+clang++ -std=c++23 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer main.cpp -o app-sanitized
+./app-sanitized Ada
+clang++ -std=c++23 -O2 -g main.cpp -o app-release
+./app-release Ada
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+W jednym poleceniu kompilującym i linkującym flaga sanitizera trafia do obu etapów. Przy oddzielnym `-c` i linkowaniu trzeba zachować ją także w końcowym kroku. Program bez argumentu powinien zakończyć się niepowodzeniem, a z `Ada` wypisać powitanie. Porównujesz zachowanie wariantów, nie czas jednego krótkiego wypisania tekstu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Kompilatory i toolchain”, oceniaj przenośność, powtarzalność budowania, jakość diagnostyki i jawne wymagania wersji standardu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Dobieraj konfigurację do pytania. Do śledzenia instrukcji wybierz build łatwy do debugowania. Do wykrywania naruszeń pamięci użyj ASan i UBSan. Do oceny szybkości uruchom zoptymalizowany program bez instrumentacji, z reprezentatywnymi danymi. Czas zmierzony w sanitizerze opisuje także koszt instrumentacji, więc nie stanowi pomiaru docelowej wersji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Osobny katalog budowania dla każdej konfiguracji zapobiega mieszaniu obiektów z różnych ustawień. Zapisuj wersje narzędzi, zamiast polegać na tym, co akurat znajduje się pierwsze w `PATH`. Wersjonowana konfiguracja budowania pozwala odtworzyć problem innej osobie bez odgadywania lokalnych ustawień IDE.
+
+## Ćwiczenie z odpowiedzią
+
+Kompilacja z `-fsyntax-only` przechodzi, ale pełny build zgłasza brak symbolu. W jakiej warstwie szukać? Przede wszystkim w definicjach i linkowaniu: sprawdź, czy odpowiedni plik obiektowy lub biblioteka rzeczywiście bierze udział w końcowym poleceniu. Dodawanie kolejnych `#include` nie dostarcza brakującej binarnej definicji zwykłej funkcji.
+
+Dokumentacja poleceń i zakresu flag: [Clang Compiler User’s Manual](https://clang.llvm.org/docs/UsersManual.html). Konkretne flagi są właściwością toolchainu, nie składnią ISO C++.
 
 ## Powiązane tematy
 

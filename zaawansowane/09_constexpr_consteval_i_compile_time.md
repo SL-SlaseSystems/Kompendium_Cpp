@@ -35,40 +35,60 @@ Koszt przenosi się z runtime do kompilatora. Monitoruj czas, pamięć, cache bu
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „constexpr, consteval i compile time”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+`hash_literal("status")` otrzymuje widok na literał o statycznym czasie przechowywania. Pętla odczytuje kolejne bajty, wykonuje XOR i mnożenie unsigned, a następnie zwraca gotową liczbę. Ponieważ funkcja jest `consteval`, wymagane wywołanie musi spełnić reguły stałego wyrażenia. Literał i wszystkie użyte operacje to umożliwiają. Zwykły napis odczytany z pliku nie mógłby zostać przekazany w tym samym miejscu.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`constexpr` na funkcji nie wymaga, aby każde wywołanie odbywało się podczas kompilacji. Wymaga odpowiednio poprawnej definicji i pozwala na stałą ewaluację, gdy kontekst jej żąda. `constexpr` na zmiennej wymaga natomiast stałego inicjalizatora i daje obiekt const. `constinit` dotyczy gwarancji inicjalizacji statycznej; nie czyni obiektu niezmiennym i nie jest synonimem `constexpr`.
 
 ## Pogłębienie mechanizmu
 
-- `consteval` wymaga constant evaluation każdego potencjalnie ocenianego wywołania, natomiast funkcja `constexpr` może działać zarówno podczas kompilacji, jak i runtime. Constant evaluation nadal przestrzega reguł języka i diagnozuje niedozwolone operacje.
-- Koszt constant evaluation i instancjacji obciąża build, choć znika z runtime. Limity głębokości, pamięci i diagnostyki kompilatora są praktyczną częścią projektu metaprogramu.
+Stała ewaluacja operuje na abstrakcyjnych obiektach o śledzonym lifetime, nie na przyszłych adresach procesu. Wolno modyfikować lokalne wartości powstałe w tej ewaluacji, więc pętle i akumulatory są naturalną techniką. Nie wolno dowolnie odczytywać modyfikowalnego stanu globalnego lub zwrócić wskaźnika do lokalnego obiektu, który już nie istnieje. Stałe wyrażenia mają także ograniczenia dotyczące operacji takich jak reinterpret_cast i wywołania funkcji nieobsługujących constant evaluation.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „constexpr, consteval i compile time” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Dynamiczna pamięć w C++20 i C++23 ma charakter przejściowy. `vector` może służyć jako warsztat do obliczenia liczby, jeśli jego przydziały zostają zwolnione w obrębie właściwej ewaluacji. Nie oznacza to możliwości zachowania dowolnego dynamicznego wektora jako trwałej zmiennej `constexpr`. Obiekt wynikowy nie może zawierać wskaźników do „sterty kompilatora”. Małe napisy mogą dodatkowo ujawniać zależności od reprezentacji biblioteki, dlatego obserwacja działania krótkiego `constexpr string` nie dowodzi działania wszystkich długości.
+
+`if consteval` oznacza kontekst natychmiastowy wewnątrz odpowiedniej gałęzi i pozwala bezpiecznie wywoływać funkcję natychmiastową z funkcji dostępnej także runtime. Natomiast `if constexpr (std::is_constant_evaluated())` to pułapka: sam warunek `if constexpr` wymaga stałej ewaluacji, więc nie wybiera gałęzi na podstawie późniejszego wywołania funkcji. Do zwykłego rozpoznania trybu używa się zwykłego `if` albo `if consteval`.
+
+UB napotkane w wymaganej stałej ewaluacji zwykle powoduje odrzucenie stałego wyrażenia. Dzięki temu `static_assert` może ujawniać przepełnienia i wyjścia poza zakres na konkretnych danych. Nie dowodzi jednak poprawności funkcji dla wszystkich wejść runtime. Kompilatory mają też limity liczby kroków, głębokości wywołań i zużycia pamięci; ich zwiększanie flagą nie zastępuje rozsądnej złożoności algorytmu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <array>
+#include <cassert>
+#include <vector>
 
-~~~text
-Temat: constexpr, consteval i compile time
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+constexpr int triangular(int n) {
+    std::vector<int> values;
+    for (int i = 1; i <= n; ++i) values.push_back(i);
+    int result = 0;
+    for (int value : values) result += value;
+    return result;
+}
+constexpr std::array<int, 4> table{
+    triangular(0), triangular(1), triangular(2), triangular(3)};
+int main() {
+    static_assert(table[3] == 6);
+    int n = 4;
+    assert(triangular(n) == 10);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Przy budowaniu tablicy wektor istnieje tylko podczas obliczeń i zostaje zniszczony przed zwróceniem liczby. Wynikowa `array` nie zawiera żadnego wskaźnika do jego pamięci. To samo ciało funkcji obsługuje wywołanie ze zwykłym `n`. Przykład ma małe, kontrolowane argumenty: dla dużych `n` należałoby rozwiązać przepełnienie sumy i licznika pętli. Deklaracja `constexpr` nie rozszerza zakresu `int`.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „constexpr, consteval i compile time”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj `consteval` do kontraktu wymagającego gotowego wyniku przy kompilacji, na przykład walidacji literału opisującego format. Współdzielona implementacja `constexpr` lepiej pasuje do algorytmu potrzebnego w obu trybach. Duże tablice warto porównać z generowaniem podczas budowania projektu: osobny generator może dać lepszy cache i krótszą kompilację wielu jednostek translacji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy funkcja `constexpr` musi być szybsza runtime? **Odpowiedź:** nie; optymalizator może obliczyć zwykłą funkcję wcześniej lub pozostawić wywołanie constexpr w runtime. Czy `constinit int counter = 0` pozwala później zwiększyć `counter`? Tak; słowo kontroluje fazę inicjalizacji, nie mutowalność. Czy zwrócenie `values.data()` z przykładu byłoby dopuszczalne jako trwały wynik? Nie, po destrukcji wektora wskaźnik nie oznacza żywych elementów.
+
+Źródła: [N4950: constant expressions](https://timsong-cpp.github.io/cppwp/n4950/expr.const) i [constexpr functions](https://timsong-cpp.github.io/cppwp/n4950/dcl.constexpr).
+
+### Wynik obliczeń a tożsamość obiektu
+
+Nie każdy wynik stałej ewaluacji jest zwykłą liczbą. Może zawierać wskaźniki lub referencje, których poprawność zależy od obiektów o dostatecznym czasie przechowywania. Widok na literał tekstowy może być prawidłowym stałym wynikiem, podczas gdy widok na lokalną tablicę utworzoną wewnątrz funkcji już nie. Przeniesienie obliczenia do compile time nie usuwa problemu wiszących referencji; kompilator po prostu ma większą możliwość jego wykrycia.
+
+`constexpr` nie wymaga automatycznie inliningu ani nie wyklucza istnienia symbolu funkcji w binarium. Funkcję można wykorzystać również w kontekstach runtime i pobierać odpowiednie adresy, z zastrzeżeniem szczególnych ograniczeń funkcji natychmiastowych. Z kolei `consteval` nie służy do wyboru konkretnego poziomu optymalizacji: określa dopuszczalną fazę wywołania. Te mechanizmy warto rozdzielać także w opisie publicznego API.
+
+Hash z pierwszego przykładu ma kolizje, ponieważ odwzorowuje dowolnie długi tekst na skończony zbiór liczb. Stałe obliczenie nie czyni go kryptograficznym ani unikatowym. Jeżeli wynik identyfikuje trwały protokół, należy ustalić kodowanie bajtów, wersję algorytmu i sposób wykrywania kolizji, niezależnie od tego, kiedy kompilator oblicza liczbę.
 
 ## Powiązane tematy
 

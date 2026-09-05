@@ -36,43 +36,63 @@ Arytmetyka wskaźników jest dozwolona tylko w obrębie jednej tablicy oraz na p
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Referencje, wskaźniki i tablice”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W pierwszym programie `data` posiada trzy obiekty `int`. Referencja `first` wiąże się z pierwszym i nie może później zostać przestawiona na drugi. Przypisanie do `first` modyfikuje element. Wskaźnik `pointer` przechowuje adres drugiego elementu; przypisanie do `*pointer` modyfikuje wskazaną liczbę, natomiast przypisanie do samego `pointer` zmieniłoby cel. Wywołanie `sum` otrzymuje widok zawierający dostęp do całego zakresu i nie przejmuje własności.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Deklaracja `int& r = a; r = b;` nie przepina referencji. Kopiuje wartość `b` do `a`. Referencja nie jest też automatycznym zabezpieczeniem czasu życia: po zniszczeniu `a` pozostaje wisząca, mimo że jej składnia nie dopuszcza zwykłego `nullptr`. Wskaźniki i referencje wymagają prawdziwego, odpowiednio wyrównanego obiektu, do którego dostęp jest legalny.
+
+Dla tablicy `int a[3]` wyrażenie `a` często konwertuje się do wskaźnika na pierwszy element. Są jednak wyjątki: `sizeof(a)` obejmuje całą tablicę, a `&a` ma typ wskaźnika do tablicy trzech liczb. W funkcji zadeklarowanej jako `f(int a[3])` parametr jest w rzeczywistości wskaźnikiem; rozmiar w nawiasach nie pozostaje częścią jego typu. To różne mechanizmy: konwersja wyrażenia i dostosowanie deklaracji parametru.
 
 ## Pogłębienie mechanizmu
 
-- Referencja musi być związana z obiektem i nie może zostać później przepięta, natomiast wskaźnik jest wartością, może być pusty i podlega arytmetyce tylko wewnątrz odpowiedniej tablicy. Żaden z nich sam nie określa własności.
+Wskaźnik one-past-the-end jest legalnym wartownikiem. Można go porównywać i odejmować w ramach tej samej tablicy, lecz nie można przez niego czytać ani pisać. `a + 3` jest poprawne dla tablicy trzech elementów, a próba utworzenia `a + 4` wykracza już poza dozwoloną arytmetykę. Nie wystarczy obiecać, że zbyt daleki adres nie zostanie później dereferencjonowany.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Referencje, wskaźniki i tablice” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Różnica wskaźników ma typ `std::ptrdiff_t` i musi być reprezentowalna w tym typie. Arytmetyka wskaźnika uwzględnia rozmiar elementu: `p + 1` przesuwa do kolejnego `T`, a nie o jeden bajt. Dla wielowymiarowego `int a[2][3]` każdy wiersz jest osobną tablicą trzech elementów. Reguły nie dają ogólnego pozwolenia na przechodzenie jednym `int*` przez granice wszystkich wierszy tylko dlatego, że reprezentacja jest ciągła.
+
+Dodawanie kwalifikacji na wielu poziomach wskaźników jest subtelne. `int*` można skonwertować do `const int*`, lecz `int**` nie konwertuje się po prostu do `const int**`. Taka konwersja pozwoliłaby podstawić adres stałej liczby do wskaźnika, który obiecuje modyfikowalny `int`, a potem próbować zmiany stałego obiektu. Ograniczenie wynika więc z ochrony typów, nie z różnicy rozmiaru reprezentacji.
+
+`nullptr` ma własny typ `std::nullptr_t` i jest właściwym sposobem oznaczania braku celu. Literał zero może oznaczać zarówno liczbę, jak i stałą pustego wskaźnika w odpowiednim kontekście, co komplikuje przeciążenia. Samo porównanie z `nullptr` nie wykrywa wskaźnika wiszącego ani adresu niewłaściwego obiektu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Referencja do tablicy zachowuje jej rozmiar jako parametr szablonu. Druga część pokazuje różnicę między przypisaniem przez referencję i zmianą celu wskaźnika.
 
-~~~text
-Temat: Referencje, wskaźniki i tablice
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <type_traits>
+
+template<class T, std::size_t N>
+constexpr std::size_t count(T (&)[N]) noexcept { return N; }
+
+int main() {
+    int values[]{10, 20, 30};
+    static_assert(count(values) == 3);
+    static_assert(std::is_same_v<decltype(&values), int (*)[3]>);
+    int* begin = values;
+    int* end = values + count(values);
+    assert(end - begin == 3);
+
+    int& alias = values[0];
+    alias = values[1];
+    assert(values[0] == 20);
+    int* selected = &values[0];
+    selected = &values[2];
+    *selected = 99;
+    assert(values[2] == 99);
+}
 ~~~
-
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Referencje, wskaźniki i tablice”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Stały rozmiar wbudowanej tablicy nie daje jej zwykłego operatora przypisania całej zawartości. Nie można wykonać `a = b` dla dwóch takich tablic. `std::array` zapewnia natomiast kopiowanie i przypisanie elementów, dzięki czemu można zwracać całą tablicę z funkcji jako wartość. To różnica interfejsu i semantyki typu, mimo że oba rozwiązania mogą przechowywać elementy bez osobnej dynamicznej alokacji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Używaj referencji dla obowiązkowego pojedynczego argumentu, a wskaźnika, gdy brak obiektu jest sensownym stanem lub trzeba zmieniać cel. Dla wielu elementów wybieraj `span`, ponieważ sam wskaźnik nie przekazuje rozmiaru. Właścicielskie tablice o stałej długości zwykle najwygodniej wyraża `std::array`, a zmiennej długości `std::vector`.
 
-## Dobre praktyki
+**Ćwiczenie.** Czy `sizeof(p) / sizeof(*p)` oblicza długość tablicy, jeśli `p` jest wskaźnikiem przekazanym do funkcji?
 
-Przekazuj obowiązkowo istniejący obiekt przez referencję, opcjonalny niewłaścicielski dostęp przez wskaźnik, ciągły zakres przez `span`, a własność przez typ wartościowy lub smart pointer. Unikaj wskaźnika i osobnego rozmiaru, jeśli może je spiąć widok.
+**Odpowiedź.** Nie. Licznik obejmuje reprezentację wskaźnika, a mianownik jeden element. Wynik może przypadkiem wyglądać sensownie, lecz nie zależy od liczby elementów źródła. Przekaż rozmiar osobno, widok `span` albo referencję zachowującą typ całej tablicy.
+
+Źródła: [deklaracje referencji](https://timsong-cpp.github.io/cppwp/n4950/dcl.ref), [arytmetyka wskaźników](https://timsong-cpp.github.io/cppwp/n4950/expr.add), [konwersja tablicy](https://timsong-cpp.github.io/cppwp/n4950/conv.array).
 
 ## Powiązane tematy
 

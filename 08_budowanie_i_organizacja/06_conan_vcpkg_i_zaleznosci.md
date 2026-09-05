@@ -18,47 +18,67 @@ Biblioteka header-only usuwa krok linkowania, ale nie jest pozbawiona kosztów: 
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Conan, vcpkg i zależności”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz odnalezienie deklaracji, przetworzenie zależności, utworzenie plików obiektowych, rozwiązanie symboli i złożenie końcowego artefaktu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel zależność źródłową, wymaganie użycia biblioteki, szczegół ABI oraz ustawienie prywatne konkretnego targetu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź graf targetów, pełne komendy kompilacji, tablicę symboli, kolejność linkowania i zawartość pakietu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Proces korzystania z pakietu ma kilka oddzielnych wyników. Najpierw manifest lub receptura określa żądane biblioteki i wersje. Menedżer rozwiązuje graf zależności, wybiera warianty oraz pobiera albo buduje pakiety. Następnie generuje lub dostarcza integrację z CMake. Dopiero `find_package` odnajduje gotowy pakiet i tworzy imported target, z którego korzysta aplikacja.
 
-Model dla tej części kompendium jest następujący: Projekt C++ jest grafem jednostek translacji, modułów, bibliotek i artefaktów. Kompilator analizuje jednostki osobno, linker łączy definicje, a system budowania musi odtworzyć zależności i opcje w sposób powtarzalny. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W Conan 2 profil opisuje ustawienia środowiska, takie jak system, architektura, kompilator i tryb budowania. Przy kompilacji krzyżowej rozróżnia się kontekst build, na którym działają narzędzia, oraz host, dla którego powstaje kod aplikacji. Generator uruchamiany w procesie budowania musi działać na komputerze budującym; jego biblioteki wynikowe mogą być przeznaczone dla innej architektury. Zmieszanie tych kontekstów daje błędy, których sama zmiana include path nie naprawi.
+
+W vcpkg manifest opisuje zależności projektu, a triplet wybiera istotne cechy docelowego wariantu, między innymi architekturę i model linkowania. Toolchain integruje wyszukiwanie pakietów z CMake. Instalacja pakietu w cache nie powoduje jeszcze, że dowolny katalog budowania zobaczy go automatycznie. Konfiguracja projektu musi używać zgodnej integracji i właściwego wariantu.
 
 ## Pogłębienie mechanizmu
 
-- Menedżer zależności rozwiązuje wersje, warianty ABI i źródła artefaktów, lecz system budowania nadal definiuje targety projektu. Lockfile lub manifest musi być częścią reprodukcji wraz z profilem kompilatora.
+Wersja źródłowa, rewizja receptury i wariant binarny są odrębnymi osiami. Ta sama wersja biblioteki może dawać różne binaria dla Debug, Release, różnych opcji, bibliotek standardowych lub ustawień runtime. Zgodny nagłówek z niezgodnym binarium potrafi skompilować się poprawnie, a następnie powodować błędy linkowania lub niepoprawne wykonanie. Szczególnie ryzykowne są makra zmieniające layout typów i przekazywanie obiektów biblioteki standardowej przez niezgodne granice ABI.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Conan, vcpkg i zależności” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Lockfile Conan utrwala wybrane informacje o rozwiązywaniu wersji i rewizji grafu; nie zastępuje wersjonowania profili, opcji i samego kompilatora. Baseline vcpkg wiąże domyślne wersje portów z określoną rewizją rejestru. Manifest bez utrwalonego baseline może z czasem rozwiązać się inaczej. Po aktualizacji zależności przeglądaj różnicę grafu, nie tylko jedną bezpośrednio zmienioną nazwę pakietu.
+
+Cache binarny przyspiesza powtarzalne budowanie, ale klucz cache musi poprawnie uwzględniać wymagane cechy wariantu. Cache nie jest także źródłem prawdy o tym, dlaczego pakiet zbudowano z określonymi opcjami. Receptury, profile, manifesty, lockfile i konfigurację toolchainu powinno dać się odtworzyć w czystym środowisku. Taki test wykrywa zależność od przypadkowo zainstalowanej biblioteki systemowej.
+
+Menedżer pakietów może wykonywać receptury i systemy budowania zależności. Wybór zaufanego rejestru, kontrola integralności źródeł oraz sprawdzenie licencji są konkretną częścią włączenia cudzej biblioteki do produktu. Nie wymagają pisania własnego menedżera; wymagają utrwalenia pochodzenia i świadomej aktualizacji. Biblioteka header-only również jest kodem wykonywanym w aplikacji, mimo braku osobnego archiwum przy linkowaniu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniższy wariant pokazuje Conan 2 i integrację przez CMakeToolchain oraz CMakeDeps. Wersja fmt jest przykładowo przypięta; nie jest deklaracją najnowszego wydania ani rekomendacją wersji dla nowego produktu.
 
 ~~~text
-Temat: Conan, vcpkg i zależności
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+# conanfile.txt
+[requires]
+fmt/11.0.2
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+# CMakeLists.txt
+cmake_minimum_required(VERSION 3.28)
+project(package_example LANGUAGES CXX)
+find_package(fmt CONFIG REQUIRED)
+add_executable(app main.cpp)
+target_compile_features(app PRIVATE cxx_std_23)
+target_link_libraries(app PRIVATE fmt::fmt)
+
+# main.cpp
+#include <fmt/format.h>
+int main() { fmt::print("answer = {}\n", 42); }
+
+# Pierwsze wykrycie profilu należy przejrzeć przed użyciem:
+conan profile detect
+conan install . --output-folder=build --build=missing -s build_type=Release
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Przy tym układzie wygenerowany toolchain znajduje się w katalogu `build`, a względna ścieżka jest rozpatrywana w kontekście konfiguracji CMake. Jeśli receptura korzysta z własnego layoutu, miejsce generatorów może być inne: czytaj rzeczywisty wynik `conan install`. Dla generatora wielokonfiguracyjnego wybór Release następuje także przy budowaniu, a instalowane konfiguracje pakietów muszą odpowiadać używanemu wariantowi.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Conan, vcpkg i zależności”, oceniaj hermetyczność, szybkość przebudowy, przenośność konfiguracji, kontrola publicznych zależności i zgodność ABI. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Conan daje rozbudowany model receptur i pakietów binarnych, przydatny również dla bibliotek wewnętrznych. vcpkg pasuje do pracy opartej na portach, manifestach i integracji toolchain. `FetchContent` może wystarczyć dla niewielkiej, kontrolowanej zależności budowanej ze źródeł, ale trzeba przypiąć jej identyfikator i rozważyć dostęp sieci podczas konfiguracji. Żaden z tych mechanizmów nie gwarantuje sam zgodności ABI całego procesu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Dlaczego przypięcie tylko `fmt/11.0.2` nie jest pełnym opisem powtarzalnego buildu? **Odpowiedź:** pozostają rewizje receptury, zależności przechodnie, opcje, profile, kompilator, biblioteka standardowa i środowisko budowania. Numer wersji określa jedną część wejścia. Dobra procedura utrwala resztę i potrafi wykonać czyste odtworzenie bez korzystania z nieudokumentowanego stanu maszyny.
 
-## Dobre praktyki
-
-Wybierz jeden główny model zależności dla projektu. Utrzymuj lockfile lub manifest, weryfikuj sumy i pochodzenie artefaktów, skanuj licencje oraz podatności. Publiczna biblioteka powinna minimalizować zależności widoczne w interfejsie, bo stają się częścią wymagań klientów.
+Źródła: [Conan 2 i CMake](https://docs.conan.io/2/tutorial/consuming_packages/build_simple_cmake_project.html), [lockfiles Conan](https://docs.conan.io/2/tutorial/versioning/lockfiles.html), [manifesty vcpkg](https://learn.microsoft.com/en-us/vcpkg/concepts/manifest-mode), [wersjonowanie vcpkg](https://learn.microsoft.com/en-us/vcpkg/users/versioning).
 
 ## Powiązane tematy
 
 - [CMake](05_cmake.md)
 - [Projektowanie API i ABI](../13_wzorce_api_i_wydajnosc/03_projektowanie_api_i_abi.md)
 - [Testowanie](../09_testowanie_i_jakosc/01_testy_jednostkowe_i_integracyjne.md)
-

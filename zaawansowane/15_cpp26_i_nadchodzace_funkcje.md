@@ -2,13 +2,16 @@
 
 # C++26 i nadchodzące funkcje
 
-**Status zweryfikowany 2026-08-12:** C++26 znajduje się w aktualnym working draft WG21 N5054, ale nie jest jeszcze opublikowaną normą ISO. Draft może otrzymywać poprawki redakcyjne i defect resolutions, a implementacje wspierają tylko wybrane części. Kod produkcyjny powinien używać feature-test macros i testów konfiguracji.
+**Status zweryfikowany 2026-09-05:** prace WG21 nad zestawem funkcji C++26 są ukończone; szczegóły i źródło podano poniżej. Bazowy tekst kompendium i testy dotyczą C++23. Funkcje C++26 wymagają osobnej kontroli frontendu, biblioteki standardowej oraz konfiguracji platformy.
 
-Do głównych mechanizmów obecnych w projekcie standardu należą statyczna refleksja oparta o `std::meta::info`, contracts, pack indexing i dalsze rozszerzenia constant evaluation. Draft rozróżnia także erroneous behavior w części sytuacji wcześniej opisywanych przez wartości indeterminate. Biblioteka rozwija execution, narzędzia współbieżne, kontenery oraz interfejsy numeryczne, w tym standardowe SIMD.
+Do głównych mechanizmów C++26 należą statyczna refleksja oparta o `std::meta::info`, contracts, pack indexing i dalsze rozszerzenia constant evaluation. Draft rozróżnia także erroneous behavior w części sytuacji wcześniej opisywanych przez wartości indeterminate. Biblioteka rozwija execution, narzędzia współbieżne, kontenery oraz interfejsy numeryczne, w tym standardowe SIMD.
 
 Poniższy zapis pokazuje jedynie ideę pack indexing i jest nietestowany przez bazowy Clang 17:
 
 ~~~cpp,notest
+#include <cstddef>
+#include <concepts>
+
 template<std::size_t I, class... Types>
 using element_t = Types...[I]; // C++26 pack indexing
 
@@ -28,49 +31,63 @@ int main() {
 #else
     constexpr bool has_pack_indexing = false;
 #endif
-    assert(!has_pack_indexing || has_pack_indexing);
+    // Informacja konfiguracji; właściwe użycie funkcji bada osobny test kompilacji.
+    (void)has_pack_indexing;
 }
 ~~~
 
 ## Strategia adopcji
 
-Najpierw ustal realną macierz kompilator–biblioteka–platforma. Izoluj nową funkcję w małym adapterze, zapewnij fallback i buduj obie ścieżki w CI. Nie emuluj refleksji lub contracts rozbudowanym makrem, jeśli koszt utrzymania przewyższa korzyść. Po publikacji normy zaktualizuj numer dokumentu i usuń określenie „projekt”.
+Najpierw ustal realną macierz kompilator–biblioteka–platforma. Izoluj nową funkcję w małym adapterze, zapewnij fallback i buduj obie ścieżki w CI. Nie emuluj refleksji lub contracts rozbudowanym makrem, jeśli koszt utrzymania przewyższa korzyść. Wersjonuj dokumentację według konkretnego tekstu standardu i rewizji implementowanej funkcji.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „C++26 i nadchodzące funkcje”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Adopcję zaczyna się od konkretnej funkcji, nie od samej flagi `-std=c++26`. Frontend rozpoznaje składnię, biblioteka dostarcza klasy i funkcje, a środowisko docelowe może wymagać dodatkowej obsługi runtime. Kompilator akceptujący pack indexing nie musi mieć standardowej refleksji, a nagłówek execution nie dowodzi obecności kompletnego modelu senders/receivers.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy pack indexing `Types...[I]` wybiera typ o ustalonym indeksie w parameter pack. Indeks musi być właściwą stałą dostępną przy kompilacji i mieścić się w granicach paczki. Mechanizm zastępuje część rekurencji metaprogramowania lub pośrednictwo `tuple_element`, lecz nie pozwala wybierać typu na podstawie zwykłej liczby runtime. Podobieństwo do indeksowania tablicy nie zmienia tej różnicy faz języka.
 
 ## Pogłębienie mechanizmu
 
-- Funkcja planowana dla C++26 przechodzi od propozycji przez głosowanie do publikacji i implementacji. Materiał powinien oznaczać status, feature macro i ograniczenia konkretnego toolchainu zamiast przedstawiać projekt jako powszechny standard.
+**Stan sprawdzony 2026-09-05:** prace komitetu nad C++26 zakończono na spotkaniu WG21 w Croydon w marcu 2026, co potwierdza [P3850R0](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2026/p3850r0.pdf). Ukończenie prac WG21, formalna publikacja ISO i dostępność konkretnej implementacji są odrębnymi zdarzeniami. Ten rozdział nie zakłada pełnego wsparcia w toolchainach ani nie nadaje przyszłym propozycjom C++29 statusu części C++26.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „C++26 i nadchodzące funkcje” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Refleksja statyczna reprezentuje informacje o programie przez wartości compile-time, pozwala je badać oraz używać określonych rezultatów przez splicing. Nie jest runtime RTTI: nie polega na odnajdywaniu dowolnych klas po tekście w działającym procesie. Nie zmienia też automatycznie prywatnych pól w publiczny format serializacji. Generator oparty na refleksji musi nadal ustalić wersjonowanie schematu, wybór pól i znaczenie danych; zmiana nazwy pola nie powinna przypadkowo łamać trwałego protokołu.
+
+Contracts opisują warunki wstępne, końcowe i asercje kontraktowe. Model C++26 rozróżnia semantyki ewaluacji, dlatego predykat nie powinien wykonywać istotnych dla logiki programu efektów ubocznych. Contract assertion nie jest uniwersalnym zamiennikiem walidacji danych wejściowych: program nadal potrzebuje jawnej ścieżki obsługi niepoprawnego żądania użytkownika. Historyczna składnia atrybutów z propozycji dla C++20 nie jest obecnym mechanizmem.
+
+Biblioteczne `inplace_vector` łączy zmienny rozmiar z pojemnością ustaloną w typie. Unika osobnej alokacji storage elementów, ale elementy nadal mogą same alokować, a przekroczenie pojemności ma własny kontrakt zależny od wybranej operacji. Standardowe SIMD opisuje operacje na wielu elementach bez uzależniania źródła od jednego zestawu intrinsics. Nie zapewnia jednak, że każdy procesor i każda liczba lanes uzyskają tę samą wydajność.
+
+Senders/receivers opisują kompozycję asynchronicznych operacji, ich completion channels i relację ze środowiskiem wykonania. Sender nie jest synonimem uruchomionego wątku ani gotowego future. Operacja musi zostać połączona z odbiorcą i uruchomiona według protokołu; zasoby jej stanu powinny istnieć przez właściwy okres. Przy adopcji najpierw zrozum rozdzielenie wartości, błędu i zatrzymania, zanim połączysz wiele adapterów w rozbudowany pipeline.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <tuple>
+#include <type_traits>
 
-~~~text
-Temat: C++26 i nadchodzące funkcje
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+template<std::size_t I, class... T>
+using selected_t = std::tuple_element_t<I, std::tuple<T...>>;
+
+int main() {
+    static_assert(std::is_same_v<selected_t<1, int, double>, double>);
+    constexpr std::tuple values{3, 4.5};
+    static_assert(std::get<0>(values) == 3);
+    assert(std::get<1>(values) == 4.5);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+To działający wariant bazowy C++23 dla wyboru typu z paczki. `selected_t` oblicza typ, a `get` pokazuje oddzielny dostęp do wartości przechowywanej w tuple. W przyszłej ścieżce z pack indexing można uprościć alias, zachowując testy semantyki. Obie ścieżki powinny odrzucać indeks poza zakresem; fallback nie powinien zwracać przypadkowego typu, aby ukryć błąd użytkownika.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „C++26 i nadchodzące funkcje”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Feature-test macro jest deklaracją dostępności określonej rewizji funkcji. Makra biblioteczne należy sprawdzać po dołączeniu odpowiedniego nagłówka albo `<version>`, a wynik potwierdzać małym testem kompilacji konkretnego użycia. `__has_include` dowodzi tylko obecności nagłówka. Numer producenta kompilatora nie wystarcza, ponieważ ta sama wersja frontendu może współpracować z różnymi bibliotekami standardowymi i SDK.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy dodatni wynik makra pack indexing uprawnia do użycia `std::meta`? **Odpowiedź:** nie; to niezależne funkcje. Czy istniejący `#include <execution>` w C++17 dowodzi wsparcia senders/receivers C++26? Nie; starszy nagłówek zawiera polityki wykonania algorytmów. Czy bieżący eel.is jest zamrożonym tekstem C++23? Nie; do bazowych reguł używamy [N4950](https://timsong-cpp.github.io/cppwp/n4950/), a [working draft](https://eel.is/c++draft/) może obejmować późniejsze zmiany.
+
+Weryfikację wsparcia prowadź w tabelach producenta: [Clang C++ status](https://clang.llvm.org/cxx_status.html), [libc++ C++26 status](https://libcxx.llvm.org/Status/Cxx26.html). Przykłady oznaczone `cpp,notest` pozostają poza walidacją C++23 i wymagają oddzielnego środowiska.
+
+Erroneous behavior z C++26 ma inne wymagania diagnostyczne niż undefined behavior i nie oznacza, że można celowo czytać dowolne niezainicjalizowane obiekty. Analizę trzeba prowadzić według rodzaju storage, sposobu inicjalizacji i operacji konsumującej wartość. Najlepsza praktyka aplikacyjna nadal polega na inicjalizacji i reprezentowaniu braku wartości przez odpowiedni typ. Podobnie mechanizmy hardened library nie zastępują walidacji obcego wejścia: sprawdzenie kontraktu biblioteki i błąd domenowy są odrębnymi poziomami odpowiedzialności.
 
 ## Powiązane tematy
 

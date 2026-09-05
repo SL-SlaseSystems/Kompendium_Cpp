@@ -26,48 +26,68 @@ Promise jest użyteczny, gdy producent wyniku jest zarządzany oddzielnie. Każd
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „future, promise i async”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz publikację danych, ustanowienie synchronizacji, wykonanie pracy przez wiele wątków i bezpieczne zakończenie lub anulowanie. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wzajemne wykluczanie, komunikację, postęp algorytmu i czas życia danych współdzielonych. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant chroniony blokadą, memory order, ownership wątku, ślad TSan i test kontrolowanego zamknięcia. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Utworzenie promise tworzy kanał wyniku oparty na stanie współdzielonym. `get_future()` wydaje odbiornik powiązany z tym stanem i może być wykonane tylko raz dla tej obietnicy. Producent ustawia wartość przez `set_value` albo wyjątek przez `set_exception`. Gotowość oznacza, że odbiorca może zakończyć oczekiwanie. Próba ponownego zaspokojenia tej samej obietnicy jest błędem protokołu sygnalizowanym przez `future_error`.
 
-Model dla tej części kompendium jest następujący: Współbieżny program opisuje relacje happens-before między operacjami. Sam czas zegarowy lub obserwowana kolejność logów nie ustanawia synchronizacji; dostęp do współdzielonego, nieatomowego obiektu bez właściwej relacji może być data race i UB. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+`future::get()` oczekuje, a następnie pobiera wartość albo ponownie rzuca zapisany wyjątek. Po takim pobraniu zwykły future traci stan i nie nadaje się do kolejnego get. `valid()` odpowiada, czy posiada stan, a nie czy wynik już jest gotowy. Do badania gotowości służą metody oczekiwania z odpowiednim statusem. Zapisanie wyniku przed jego odebraniem zapewnia wymaganą synchronizację, ale nie chroni przyszłych niezależnych modyfikacji danych współdzielonych.
+
+`std::async(std::launch::async, f, args...)` uruchamia wywołanie z polityką asynchroniczną i samo przechwytuje wyjątek do stanu future. Przy polityce deferred funkcja zostanie wykonana w wątku, który rozpocznie odpowiednie oczekiwanie, a niekoniecznie w osobnym pracowniku. Domyślna kombinacja dopuszcza wybór implementacji. Jeśli architektura wymaga określonej polityki, wybierz ją jawnie.
 
 ## Pogłębienie mechanizmu
 
-- Promise zapisuje wynik współdzielonego stanu, a future pobiera go najwyżej zgodnie z kontraktem danego typu. Polityka `std::async` może dopuścić wykonanie deferred, więc jawna polityka jest potrzebna, gdy wymagany jest osobny wątek.
-- `co_await` jest rozwijane przez protokół `await_ready`, `await_suspend` i `await_resume`. Ownership coroutine handle oraz chwila zniszczenia frame muszą być jawne, szczególnie przy wyjątkach i anulowaniu.
+`wait()` tylko czeka i nie pobiera wyniku ani nie zgłasza zapisanego wyjątku jako wyniku zadania. Dopiero get jest punktem obserwacji błędu. Dla deferred oczekiwanie czasowe może zwrócić status `deferred`, zamiast uruchomić pracę i odliczać do jej końca. Pętla sprawdzająca tylko `ready` i `timeout` może więc pominąć trzeci legalny stan.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „future, promise i async” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Future pochodzący z async ma szczególne reguły czasu życia. Zwolnienie ostatniego odniesienia do jeszcze niegotowego stanu utworzonego z polityką async może blokować do zakończenia wątku. Dwie instrukcje tworzące i natychmiast porzucające tymczasowe future mogą przez to wykonywać zadania kolejno. Aby pozwolić im działać równolegle, przechowaj oba odbiorniki, a dopiero potem pobieraj wyniki.
+
+Zwykły future otrzymany z promise nie daje analogicznego automatycznego join dla dowolnego producenta. Producent ma osobnego właściciela wątku lub zadania. Porzucenie promise bez ustawienia wyniku prowadzi do `broken_promise` w stanie współdzielonym, dzięki czemu odbiorca nie czeka bez końca tylko dlatego, że obiekt obietnicy zniknął. To sygnał porzucenia protokołu, nie normalny kod sukcesu.
+
+`shared_future` pozwala wielu odbiorcom czekać na ten sam wynik. Dla typowego T get zwraca referencję do wartości przechowywanej w stanie; jego żywotność musi wystarczyć odbiorcom. Kopie shared_future mogą być używane w różnych wątkach, ale mutowalny obiekt osiągalny przez wynik nadal wymaga własnych reguł synchronizacji. Współdzielenie kanału nie nadaje każdemu wskazanemu obiektowi automatycznej niezmienności.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Producent sam zarządza obietnicą i świadomie przekazuje wyjątek. Dzięki temu odbiorca obsługuje błąd na swoim stosie wykonania.
 
-~~~text
-Temat: future, promise i async
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <exception>
+#include <future>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+int main() {
+    std::promise<int> promise;
+    auto result = promise.get_future();
+    std::jthread producer([output = std::move(promise)]() mutable {
+        try {
+            throw std::runtime_error{"cannot compute"};
+        } catch (...) {
+            output.set_exception(std::current_exception());
+        }
+    });
+
+    bool failed = false;
+    try {
+        (void)result.get();
+    } catch (const std::runtime_error&) {
+        failed = true;
+    }
+    assert(failed);
+    assert(!result.valid());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Przeniesienie promise do lambdy wyraża jednego producenta i zapobiega przypadkowemu użyciu obietnicy przez dwa miejsca. `mutable` jest potrzebne, aby zmieniać stan przechwyconego obiektu. W tym kontrolowanym protokole `set_exception` jest pierwszym ustawieniem prawidłowego stanu. W większym systemie ponowne ustawienie obietnicy samo mogłoby rzucić i nie powinno przypadkowo opuścić funkcji startowej wątku.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „future, promise i async”, oceniaj najprostszy poprawny model, możliwość anulowania, brak data race, ograniczone contention i udowodniony lifetime. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Future pasuje do jednorazowego rezultatu. Kolejka lub inny kanał jest właściwszy dla strumienia wielu wiadomości. `packaged_task` łączy wywoływalny obiekt z jego future, ale sam nie wybiera executora ani nie uruchamia automatycznie wątku; można przekazać go do własnej puli. C++23 nie ma standardowego `.then`, ogólnej puli ani automatycznego anulowania pracy przez zniszczenie zwykłego future.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `result.wait()` wystarcza, aby zewnętrzny `catch` odebrał wyjątek zadania async? **Odpowiedź:** nie. Wait zapewnia gotowość, lecz wyjątek jest ponownie zgłaszany przez get. Porzucenie gotowego future może więc zgubić informację o porażce, jeśli architektura nie wymaga obserwacji wyniku każdego zadania.
 
-## Dobre praktyki
-
-Jawnie wybieraj launch policy, gdy zależy Ci na równoległości. Nie twórz nieograniczonej liczby systemowych wątków przez `async`. Dla większych systemów użyj executora lub puli z jasnym backpressure, anulowaniem i strategią obsługi błędów.
+Źródła reguł: [C++23: future i promise](https://timsong-cpp.github.io/cppwp/n4950/futures), [polityki async](https://timsong-cpp.github.io/cppwp/n4950/futures.async), [stan współdzielony](https://timsong-cpp.github.io/cppwp/n4950/futures.state).
 
 ## Powiązane tematy
 
 - [Wątki](01_thread_jthread_i_stop_token.md)
 - [Korutyny](../12_wspolczesny_cpp/05_korutyny.md)
 - [Mechanika korutyn](../zaawansowane/12_korutyny_promise_awaitery_i_frame.md)
-

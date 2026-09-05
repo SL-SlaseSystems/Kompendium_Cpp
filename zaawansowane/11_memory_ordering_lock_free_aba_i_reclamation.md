@@ -29,51 +29,68 @@ int main() {
 }
 ~~~
 
-`compare_exchange_weak` może zawieść pozornie i dlatego zwykle działa w pętli. Parametr expected jest zapisywany aktualną wartością przy porażce. Failure ordering nie może być release ani acq_rel i nie może być silniejszy w niedozwolony sposób od success ordering.
+`compare_exchange_weak` może zawieść pozornie i dlatego zwykle działa w pętli. Parametr expected jest zapisywany aktualną wartością przy porażce. Failure ordering nie może być release ani acq_rel; w C++23 obowiązują reguły właściwe dla odczytu po nieudanym CAS.
 
 ABA występuje, gdy wartość zmienia się z A do B i z powrotem do A. CAS widzi oczekiwane A, ale logiczny stan mógł się zmienić. Rozwiązania obejmują tagowane wskaźniki/liczniki, hazard pointers, epoch-based reclamation, RCU lub zmianę struktury. Same memory orders nie rozwiązują ABA.
 
-Najtrudniejsze jest zwalnianie pamięci. Wątek może posiadać pointer do węzła usuniętego przez inny wątek. `shared_ptr` upraszcza lifetime, ale jego atomowe użycie i koszty mają własne kontrakty. Reclamation scheme musi gwarantować, że żaden czytelnik nie używa węzła przed `delete`.
+Najtrudniejsze jest zwalnianie pamięci. Wątek może posiadać pointer do węzła usuniętego przez inny wątek. `shared_ptr` upraszcza lifetime, ale jego atomowe użycie i koszty mają własne kontrakty. Protokół reclamation musi odroczyć `delete` do chwili, gdy żaden czytelnik nie może już uzyskać dostępu do zwalnianego węzła; normalny dostęp przed jego usunięciem pozostaje dozwolony.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Memory ordering, lock-free, ABA i reclamation”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+`increment_below` najpierw odczytuje bieżący licznik. Jeżeli wartość osiągnęła limit, nie próbuje zapisu. W przeciwnym razie CAS porównuje licznik z `current` i atomowo zastępuje go `current + 1`, tylko jeśli oczekiwanie nadal odpowiada rzeczywistości. Ta udana operacja jest punktem linearyzacji: chwilą, w której zwiększenie można umieścić w hipotetycznym wykonaniu sekwencyjnym.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy porażce CAS aktualizuje `current`, więc następna iteracja ponownie sprawdza limit dla zaobserwowanej wartości. Nie wolno bez zastanowienia przenosić obliczenia nowej wartości poza pętlę. `weak` może zawieść także bez zmiany licznika; pętla obsługuje ten przypadek. Arytmetyka jest bezpieczna, ponieważ `current < limit`, a `limit` mieści się w `int`, więc zwiększana wartość jest mniejsza od maksimum typu.
 
 ## Pogłębienie mechanizmu
 
-- Lock-free opisuje postęp systemu, nie sprawiedliwość ani szybkość. Problem ABA wynika z powrotu reprezentacji do wcześniejszej wartości, a reclamation musi zapobiec zwolnieniu węzła obserwowanego przez inny wątek.
+Każdy atomik ma własny modification order. `relaxed` zachowuje niepodzielność i wymagania spójności dla tego obiektu, ale nie publikuje automatycznie zwykłych pól znajdujących się obok. Jeżeli licznik służy tylko do zliczania i ograniczania przydziałów, może to wystarczyć. Jeżeli oznacza „dane gotowe”, potrzebna jest relacja synchronizacji pomiędzy zapisami danych a odczytami odbiorcy.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Memory ordering, lock-free, ABA i reclamation” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Release synchronizuje się z acquire, który odczytuje odpowiednią wartość z tego samego atomika albo z właściwej release sequence. Samo wystąpienie słów release i acquire w dwóch wątkach nie wystarcza. Po połączeniu tej relacji z kolejnością operacji wewnątrz wątków otrzymujemy happens-before dla danych nieatomowych. Acquire odczytujące wcześniejsze `false` nie uprawnia jeszcze do czytania opublikowanego payloadu.
+
+Release sequence w C++23 obejmuje następujący po operacji release odpowiedni ciąg operacji read-modify-write. Nie przenoś bez sprawdzenia starszego opisu, który obejmował dodatkowe zwykłe zapisy przez pierwotny wątek. Dla CAS porządek porażki opisuje tylko odczyt: nie może być `release` ani `acq_rel`. Dodatkowe reguły zależności success/failure zmieniały się historycznie; w C++23 nie należy powtarzać dawnego ogólnego zakazu „failure nigdy nie może być silniejsze niż success”.
+
+ABA jest problemem historii logicznej, nie atomowości samego słowa. Usunięty węzeł może zostać zwolniony, a nowa alokacja otrzymać ten sam adres. CAS porównujący wyłącznie adres uzna go za niezmieniony. Tag ogranicza takie pomyłki, lecz trzeba rozważyć przepełnienie licznika i dostępność atomowego porównania całej pary. Hazard pointers wymagają protokołu publikacji ochrony oraz ponownego sprawdzenia wskaźnika; samo zapisanie go w tablicy po dereferencji przychodzi za późno.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <atomic>
+#include <cassert>
+#include <thread>
 
-~~~text
-Temat: Memory ordering, lock-free, ABA i reclamation
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+int main() {
+    int payload = 0;
+    std::atomic<bool> ready{false};
+    std::jthread producer([&] {
+        payload = 42;
+        ready.store(true, std::memory_order_release);
+        ready.notify_one();
+    });
+    while (!ready.load(std::memory_order_acquire))
+        ready.wait(false, std::memory_order_relaxed);
+    assert(payload == 42);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Odczyt acquire w warunku, który zobaczy `true`, ustanawia widoczność wcześniejszego zapisu `payload`. `wait` może jedynie uśpić oczekujący wątek; użyto dla niego relaxed, ponieważ dowód publikacji opiera się na ponownym odczycie warunku. `notify_one` nie jest samodzielnym zastępnikiem release. Przykład ma jednego producenta i jednorazową zmianę flagi, więc nie wymaga protokołu ponownego wykorzystania bufora.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Memory ordering, lock-free, ABA i reclamation”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Mutex upraszcza ochronę złożonych inwariantów i zwalnianie pamięci, a biblioteczne kolejki często dają lepszy wynik niż własny lock-free. Nawet jeśli CAS na liczniku jest lock-free, alokacja węzła, destruktor danych albo systemowy alokator mogą blokować cały algorytm. `is_lock_free` i `is_always_lock_free` odnoszą się do operacji danego typu atomowego, nie do dowolnej funkcji, która go używa.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy zamiana wszystkich porządków na `seq_cst` naprawi dereferencję zwolnionego węzła? **Odpowiedź:** nie; silniejszy porządek nie przedłuża lifetime. Czy usunięcie `notify_one` z przykładu zachowuje gwarantowany postęp oczekiwania? Nie należy na to liczyć; zmiana wartości nie zastępuje wymaganego powiadomienia śpiących obserwatorów. Czy lock-free gwarantuje szybkie zakończenie każdemu wątkowi? Nie, pojedynczy wątek może wielokrotnie przegrywać CAS.
 
-## Dobre praktyki
+Źródła: [N4950: memory ordering](https://timsong-cpp.github.io/cppwp/n4950/atomics.order), [CAS](https://timsong-cpp.github.io/cppwp/n4950/atomics.types.operations) oraz [happens-before](https://timsong-cpp.github.io/cppwp/n4950/intro.races).
 
-Zacznij od mutexa i zmierz contention. Korzystaj z opublikowanych algorytmów oraz biblioteki reclamation zamiast improwizacji. Testy stresowe nie są dowodem, a TSan może nie rozumieć każdej niestandardowej synchronizacji.
+### Postęp i publikacja złożonego stanu
+
+Relacja synchronizacji nie blokuje przyszłych modyfikacji payloadu. W jednorazowym przykładzie producent kończy zapis przed publikacją i nie zmienia danych ponownie. Gdyby po ustawieniu `ready` zaczął wpisywać kolejną wiadomość do tego samego pola, odbiorca mógłby z nim konkurować. Potrzebny byłby dodatkowy protokół zwrotu własności bufora, mutex albo struktura z osobnymi generacjami danych.
+
+Atomowy `shared_ptr` upraszcza ochronę lifetime przez przejmowanie udziału we własności, lecz nie chroni pól wskazywanego obiektu przed równoczesną modyfikacją. Wskaźnik może być bezpiecznie opublikowany, a jego payload nadal wymagać mutexa. Operacje takiego atomika nie muszą być lock-free, a ostatnie zwolnienie udziału może uruchomić kosztowny destructor. Ocena czasu najgorszego przypadku musi objąć również te efekty.
+
+Testy obciążeniowe pozwalają znajdować błędy, ale brak awarii przez milion iteracji nie jest dowodem ordering. Dla małego protokołu rozpisz zdarzenia zapisów i odczytów, wartości odczytywane przez atomiki oraz krawędzie happens-before. Jeżeli po usunięciu przypadkowej kolejności harmonogramu pozostają konflikty bez synchronizacji, algorytm wymaga poprawki niezależnie od wyniku benchmarka.
+
+Porównanie wykonywane przez CAS nie jest domenowym operatorem równości T. Dla odpowiednich specjalizacji porównywana jest reprezentacja wartości według reguł atomika. Typy z wieloma reprezentacjami tej samej semantycznej wartości, w szczególności liczby zmiennoprzecinkowe, wymagają ostrożności. Projektowanie protokołu na prostym indeksie lub liczniku często ułatwia zarówno dowód, jak i dobór dostępnej instrukcji procesora.
 
 ## Powiązane tematy
 

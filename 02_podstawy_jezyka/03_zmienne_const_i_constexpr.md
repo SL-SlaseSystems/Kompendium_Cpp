@@ -32,43 +32,62 @@ int main() {
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Zmienne, const i constexpr”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Najpierw oddziel kwalifikację obiektu od kontekstu obliczenia. `const int n = read();` zabrania późniejszego przypisania do `n`, lecz może wymagać odczytu danych podczas działania programu. `constexpr int n = expression;` wymaga odpowiedniego stałego inicjalizatora i również czyni obiekt stałym. Gdy inicjalizator nie spełnia wymagań, program jest niepoprawny i kompilator powinien zgłosić błąd; nie przechodzi po cichu do obliczenia runtime.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W początkowym programie `checked_size(4)` jest obliczane w wymaganym kontekście stałym. Wynik staje się argumentem szablonu `std::array`, czyli częścią typu. `square(count)` w `static_assert` również musi zostać wyliczone jako stała. Ta sama funkcja może przyjąć wartość odczytaną podczas wykonania, jeśli jej wynik nie służy jako wymagane stałe wyrażenie. Specyfikator funkcji daje możliwość, a miejsce wywołania określa obowiązek.
+
+Stałość jest płytka. `const int* p` pozwala zmieniać adres w `p`, ale nie wartość przez `*p`. `int* const p` blokuje zmianę adresu, lecz pozwala modyfikować wskazany `int`. W szczególności `constexpr int*` jest stałym wskaźnikiem, nie automatycznie wskaźnikiem do stałego `int`. Analogicznie stały obiekt przechowujący wskaźnik nie zamraża wskazywanego zasobu.
 
 ## Pogłębienie mechanizmu
 
-- `const` blokuje modyfikację przez dany dostęp, lecz nie zawsze czyni wartość stałą czasu kompilacji. `constexpr` nakłada wymagania umożliwiające constant evaluation, a konkretny odczyt nadal może nastąpić w runtime.
+`const` na referencji do obiektu modyfikowalnego ogranicza tylko tę drogę dostępu. Inny alias może legalnie zmienić obiekt i kolejny odczyt przez stałą referencję zobaczy zmianę. Inna sytuacja zachodzi, gdy sam obiekt utworzono jako stały: próba jego modyfikacji po usunięciu kwalifikacji przez `const_cast` prowadzi do UB. Rzutowanie nie zmienia historii utworzenia obiektu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Zmienne, const i constexpr” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Stała całkowita z inicjalizatorem będącym odpowiednim stałym wyrażeniem, na przykład `const int n = 4`, może nadawać się do rozmiaru tablicy bez słowa `constexpr`. Nie należy z tego wyciągać ogólnego wniosku o wszystkich obiektach `const`. `constexpr` wyraża zamierzenie wyraźniej i kompilator sprawdza jego wymagania od razu przy deklaracji.
+
+`constinit` stosuje się do zmiennych o statycznym lub wątkowym czasie przechowywania. Odrzuca konieczność dynamicznej inicjalizacji takiej zmiennej, lecz nie zabrania jej późniejszych modyfikacji. Nie można używać go jako zamiennika `const` dla lokalnego automatycznego obiektu. Nie rozwiązuje też wyścigów danych ani wszystkich zależności występujących podczas kończenia programu.
+
+Warto rozróżniać regułę języka i optymalizację. Kompilator może zastąpić wynikiem obliczenie zwykłej funkcji, gdy zachowuje obserwowalne zachowanie programu. Taka optymalizacja nie sprawia, że wyrażenie wolno wpisać jako argument szablonu. Legalność stałego wyrażenia wynika ze standardu, a nie z tego, czy asembler zawiera jeszcze mnożenie.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+W tym programie odczyt przez stałą referencję obserwuje zmianę dokonaną przez właściciela. Stała tablica ma rozmiar znany podczas kompilacji, a licznik inicjalizowany statycznie nadal pozostaje modyfikowalny.
 
-~~~text
-Temat: Zmienne, const i constexpr
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <cassert>
+#include <type_traits>
+
+constinit int requests = 0;
+constexpr int twice(int value) { return value * 2; }
+
+int main() {
+    int value = 3;
+    const int& observed = value;
+    auto snapshot = observed;
+    value = 9;
+    assert(observed == 9);
+    assert(snapshot == 3);
+    static_assert(std::is_same_v<decltype(snapshot), int>);
+
+    constexpr int size = twice(3);
+    std::array<int, size> buffer{};
+    ++requests;
+    assert(requests == 1);
+    assert(buffer.size() == 6);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`auto snapshot` tworzy niezależny obiekt typu `int`. Brak najwyższego `const` w tym typie nie jest obejściem zakazu: kopiowanie wartości było dozwolone. Gdyby deklaracja brzmiała `const auto& snapshot`, wynik byłby aliasem i zmiana źródła stałaby się widoczna również przez tę nazwę.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Zmienne, const i constexpr”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj `const`, kiedy obiekt nie powinien się zmieniać po inicjalizacji. Wybieraj `constexpr` dla stałych potrzebnych kompilatorowi i funkcji mających sens zarówno dla stałych, jak i danych runtime. `consteval` nadaje się do walidowanych konstruktorów danych konfiguracyjnych obliczanych wyłącznie podczas kompilacji. `constinit` jest narzędziem kontroli inicjalizacji stanu o długim czasie przechowywania, nie modelem jego niezmienności.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `const std::unique_ptr<int>` chroni wskazaną liczbę przed zmianą? Jaki typ przekazać, aby odbiorca miał wyłącznie dostęp do odczytu tej liczby?
 
-## Dobre praktyki
+**Odpowiedź.** Stały smart pointer blokuje zmianę własności przez tę instancję, ale jego dereferencja nadal może dać modyfikowalny `int&`. Do niewłaścicielskiego odczytu zwykle wystarczy `const int&` lub `const int*`. Jeśli sam model własności ma obejmować stały obiekt, odpowiednim typem jest `std::unique_ptr<const int>`.
 
-Inicjalizuj obiekty natychmiast. Stosuj `const` domyślnie dla nazw, których nie trzeba modyfikować. Używaj `constexpr`, kiedy operacja ma sens zarówno w compile time, jak i runtime, a `consteval` tylko gdy brak wyniku compile-time ma być błędem. Nie traktuj compile-time jako darmowego: może zwiększać czas kompilacji i rozmiar diagnostyki.
+Źródła: [kwalifikatory const i volatile](https://timsong-cpp.github.io/cppwp/n4950/dcl.type.cv), [constexpr](https://timsong-cpp.github.io/cppwp/n4950/dcl.constexpr), [constinit](https://timsong-cpp.github.io/cppwp/n4950/dcl.constinit).
 
 ## Powiązane tematy
 

@@ -18,7 +18,7 @@ int use_after_free() {
 }
 ~~~
 
-Nie każdy błąd to UB. Wyjątek z `vector::at`, niepowodzenie `dynamic_cast` do wskaźnika albo deadlock mają zdefiniowane konsekwencje. Zachowanie implementation-defined wymaga dokumentacji wyboru, unspecified dopuszcza kilka wyników, a ill-formed program wymaga diagnostyki, o ile nie zaznaczono inaczej.
+Nie każdy błąd to UB. Wyjątek z `vector::at`, niepowodzenie `dynamic_cast` do wskaźnika mają określone konsekwencje. Brak postępu trzeba analizować według kontraktu synchronizacji: nie każdy deadlock jest UB, lecz ponowne blokowanie niewłaściwego mutexa może naruszać wymagania API. Zachowanie implementation-defined wymaga dokumentacji wyboru, unspecified dopuszcza kilka wyników, a ill-formed program wymaga diagnostyki, o ile nie zaznaczono inaczej.
 
 ~~~cpp
 #include <cassert>
@@ -41,39 +41,57 @@ Sanitizery wykrywają część naruszeń w wykonanych ścieżkach. Analiza staty
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Undefined behavior i model maszyny”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W `checked_add` warunki są sprawdzane **przed** dodawaniem. Dla dodatniego `right` odejmowanie od maksimum nie przepełnia typu, a nierówność rozpoznaje wartości `left`, dla których suma byłaby za duża. Dla ujemnego `right` odejmowanie od minimum daje reprezentowalny próg. Dopiero po odrzuceniu obu przypadków funkcja wykonuje dodawanie. Kod nie próbuje wykrywać przepełnienia na podstawie już przepełnionego wyniku; taka kontrola przyszłaby za późno.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przykładowo dla `left = INT_MAX`, `right = 1` pierwsza nierówność jest prawdziwa i funkcja zwraca pusty `optional`. Dla `left = INT_MIN`, `right = -1` działa druga gałąź. Dla liczb przeciwnych znaków przekroczenie skrajnej wartości nie nastąpi, więc nie potrzeba szerszego typu. To rozumowanie działa także wtedy, gdy `long long` nie jest szerszy od badanego typu; samo rzutowanie do domniemanego większego typu nie jest uniwersalnym zabezpieczeniem.
 
 ## Pogłębienie mechanizmu
 
-- Undefined behavior pozwala implementacji zakładać, że dana sytuacja nie występuje w poprawnym programie. Skutek może pojawić się daleko od naruszenia po optymalizacji, dlatego obserwacja oczekiwanego wyniku nie stanowi dowodu poprawności.
+Reguła as-if opisuje równoważność obserwowalnego zachowania, a nie liczbę instrukcji procesora. Kompilator może usunąć zapis do lokalnej zmiennej, zwinąć pętlę albo obliczyć wynik wcześniej. Dla `int x` wyrażenie `x + 1 > x` jest prawdziwe dla wszystkich wartości, dla których dodawanie jest zdefiniowane. Optymalizator może więc zwrócić `true` bez wykonywania dodawania. Procesor posiadający instrukcję dodawania modulo nie zmienia semantyki signed overflow w źródłowym C++.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Undefined behavior i model maszyny” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Zachowanie unspecified nie daje podobnej swobody. Przy `f(g(), h())` implementacja może wybrać kolejność argumentów, ale od C++17 ich ewaluacje są indeterminately sequenced: nie przeplatają się. Program musi tolerować dozwolone kolejności, lecz nie staje się przez sam brak ustalonej kolejności programem z UB. Natomiast niezsekwencjonowana modyfikacja i odczyt tego samego skalara może już naruszać reguły języka.
+
+Odczyt niezainicjalizowanego zwykłego `int` w C++23 zasadniczo prowadzi do UB. Nie wolno przenosić tu opisu **erroneous behavior z C++26** bez wskazania wersji i dokładnej kategorii pamięci. Podobnie „kompilator nie ostrzegł” nie oznacza defined behavior: wielu naruszeń wykonania implementacja nie musi diagnozować. Program ill-formed no diagnostic required, na przykład wskutek pewnych naruszeń ODR, stanowi jeszcze inną kategorię niż błąd składni wymagający komunikatu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <limits>
+#include <optional>
 
-~~~text
-Temat: Undefined behavior i model maszyny
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+std::optional<int> quotient(int a, int b) {
+    if (b == 0) return std::nullopt;
+    if (a == std::numeric_limits<int>::min() && b == -1)
+        return std::nullopt;
+    return a / b;
+}
+int main() {
+    assert(quotient(-7, 3) == -2);
+    assert(!quotient(1, 0));
+    assert(!quotient(std::numeric_limits<int>::min(), -1));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Dzielenie całkowite obcina wynik w stronę zera, więc pierwsze sprawdzenie daje `-2`. Sam test dzielnika nie wystarcza: iloraz minimum przez `-1` nie mieści się w `int`. Ten sam szczególny przypadek trzeba rozważyć przy operatorze reszty `%`. Zamiana tych operatorów na funkcję opakowującą pozwala skupić dowód poprawności w jednym miejscu i zwracać błąd należący do domeny aplikacji.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Undefined behavior i model maszyny”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Typ unsigned wybieraj, kiedy potrzebujesz arytmetyki modulo, masek bitowych lub reprezentacji nieujemnej o dobrze rozumianych konwersjach. Nie traktuj go jako automatycznej ochrony przed błędami liczbowymi: odejmowanie `0u - 1u` jest zdefiniowane, ale może zamienić brak elementu w ogromny indeks. Sanitizer UB nie musi zgłosić logicznego błędu w poprawnej arytmetyce unsigned.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+ASan wykrywa wiele błędów adresowania, UBSan wybrane naruszenia semantyki, a TSan wyścigi danych. Każdy wymaga uruchomienia odpowiednich ścieżek; żaden nie jest pełnym dowodem. W analizie porównuj wersję z optymalizacją i diagnostyką, lecz nie „naprawiaj” programu samym obniżeniem poziomu optymalizacji. Wyłączenie strict aliasing jest rozszerzeniem konfiguracji kompilatora, a nie zmianą przenośnego kontraktu C++.
+
+**Ćwiczenie.** Dlaczego `if (a + b < a)` nie sprawdza niezawodnie przepełnienia signed? **Odpowiedź:** wyrażenie warunku samo może już wykonać UB; optymalizator rozumuje przy założeniu, że poprawne wykonanie go nie zawiera. Dlaczego `assert(pointer)` nie sprawdza lifetime? Niezerowy adres może wskazywać zwolnioną pamięć lub obiekt innego typu. Sprawdzenie wartości wskaźnika i legalności dereferencji to różne obowiązki.
+
+Źródło reguł: [N4950: abstract machine](https://timsong-cpp.github.io/cppwp/n4950/intro.abstract) i [ewaluacja wyrażeń](https://timsong-cpp.github.io/cppwp/n4950/intro.execution).
+
+### Granica obietnic dla optymalizatora
+
+`volatile` nie jest uniwersalnym hamulcem optymalizacji i nie wprowadza atomowości między wątkami. Ma szczególne znaczenie dla obserwowalnych dostępów i interfejsów określonych przez implementację, na przykład pamięci mapowanej na urządzenia. Użycie go na współdzielonym liczniku nie usuwa data race. Podobnie kompilatorowa bariera asemblerowa nie jest automatycznie odpowiednikiem relacji happens-before w standardowym C++.
+
+Precondition biblioteki może być równie ważny jak reguła operatora. `vector::operator[]` wymaga poprawnego indeksu; po przekroczeniu `size()` nie wolno usprawiedliwiać dostępu tym, że pamięć mieści się w przydzielonej pojemności. `at()` oferuje kontrolowany wyjątek dla błędnego indeksu, lecz nadal nie chroni przed użyciem już zniszczonego wektora. Kolejne warstwy API rozwiązują określone klasy problemów, nie wszystkie problemy pamięci jednocześnie.
+
+Przy badaniu podejrzanej optymalizacji najpierw zmniejsz przykład, zachowując wymagania dotyczące typów, lifetime i kolejności. Następnie określ zbiór dozwolonych wyników niezależnie od obserwacji jednego uruchomienia. Jeśli kod maszynowy nie odpowiada temu zbiorowi dla poprawnego programu, masz podstawę do zgłoszenia błędu kompilatora. Jeżeli wcześniejsza instrukcja narusza semantykę, nietypowy wynik może być konsekwencją tego naruszenia.
 
 ## Powiązane tematy
 

@@ -33,39 +33,61 @@ Wartości zmiennoprzecinkowe są zwykle zgodne z IEEE 754, lecz standard dopuszc
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Typy podstawowe i literały”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Typ literału ustala się przed przypisaniem do zmiennej. W `long long n = 2'000'000'000 * 2;` oba operandy mogą mieć typ `int`, więc poszerzenie wyniku do `long long` nie naprawi wcześniejszego przepełnienia na implementacji z 32-bitowym `int`. Zapis `2'000'000'000LL * 2` zmienia typ obliczenia. Apostrof jest separatorem cyfr i nie wpływa na wartość.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Dla dziesiętnego literału całkowitego bez sufiksu kompilator wybiera pierwszy mieszczący wartość typ z listy `int`, `long`, `long long`. Dla zapisu szesnastkowego, ósemkowego i binarnego lista uwzględnia również odpowiednie typy unsigned. Dlatego dwa zapisy tej samej dużej wartości nie muszą mieć takiego samego typu. Prefiks zero oznacza zapis ósemkowy: `010` oznacza osiem, a nie dziesięć.
+
+W wyrażeniu z małymi typami całkowitymi zachodzą promocje. Dwa `unsigned char` często są dodawane jako `int`, a dopiero wynik zostaje skonwertowany do typu celu. Reguły operatora dotyczą typu obliczenia, nie tylko typów przechowywanych zmiennych. Z kolei `-1` składa się z operatora minusa i dodatniego literału; minus nie jest częścią tokenu literału całkowitego.
 
 ## Pogłębienie mechanizmu
 
-- Rozmiary typów całkowitych zależą od implementacji, ale standard gwarantuje minimalne zakresy i kolejność szerokości. Typ literału wynika z zapisu oraz sufiksu, co może zmienić wynik overload resolution i konwersji.
+`sizeof(char)` zawsze wynosi jeden, ale ten jeden bajt zawiera `CHAR_BIT` bitów, co najmniej osiem. `char`, `signed char` i `unsigned char` są trzema różnymi typami. Znak zwykłego `char` zależy od implementacji. `std::byte` służy reprezentacji surowych bajtów; celowo nie udostępnia zwykłej arytmetyki liczbowej. `void` oznacza brak wartości lub nieokreślony typ obiektu za wskaźnikiem, lecz nie można utworzyć zwykłej zmiennej typu `void`.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Typy podstawowe i literały” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Literał `"abc"` ma typ tablicy czterech stałych znaków: trzy litery i terminator. `"a\0b"` zawiera wewnętrzne zero, więc jego długość jako tablicy i długość interpretowana przez funkcję C są różne. Literał surowy `R"(C:\tmp\file)"` upraszcza zapis ukośników, ale nadal reprezentuje zwykły ciąg znaków. Prefiks kodowania nie zamienia jednostki kodowej w pełny znak Unicode: pojedynczy znak może potrzebować kilku jednostek UTF-8 lub UTF-16.
+
+Dla liczb zmiennoprzecinkowych `min()` z `numeric_limits` oznacza najmniejszą dodatnią wartość znormalizowaną, natomiast `lowest()` najbardziej ujemną wartość skończoną. `epsilon()` opisuje odstęp wokół jedynki. Nie jest uniwersalnym progiem błędu dla liczb o dowolnej skali. Gdy dziedzina wymaga dokładnych wartości dziesiętnych, warto rozważyć reprezentację całkowitą ze zdefiniowaną skalą zamiast przypadkowej tolerancji.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Granice typu można sprawdzać bez zakładania liczby jego bitów. Program pokazuje też różnicę między literałem zawierającym zero a napisem interpretowanym jako C string.
 
-~~~text
-Temat: Typy podstawowe i literały
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <climits>
+#include <limits>
+#include <string_view>
+#include <type_traits>
+
+int main() {
+    constexpr unsigned maximum = std::numeric_limits<unsigned>::max();
+    static_assert(maximum + 1u == 0u);
+    static_assert(sizeof(char) == 1);
+    static_assert(CHAR_BIT >= 8);
+    static_assert(std::is_same_v<decltype(1.0f), float>);
+    static_assert(std::is_same_v<decltype(1.0), double>);
+
+    static constexpr char raw[] = "a\0b";
+    constexpr std::string_view all{raw, sizeof(raw) - 1};
+    constexpr std::string_view c_text{raw};
+    static_assert(all.size() == 3);
+    static_assert(c_text.size() == 1);
+    assert(all[2] == 'b');
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+W konstruktorze z długością `string_view` nie szuka terminatora i zachowuje wszystkie trzy znaki. Konstruktor przyjmujący sam wskaźnik ustala długość do pierwszego zera. Dane binarne i tekst z jawnie podaną długością należy zatem przekazywać interfejsem zawierającym rozmiar.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Typy podstawowe i literały”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj typ na podstawie zakresu i operacji. `int` jest dobrym domyślnym typem dla niedużych liczb ze znakiem. `std::size_t` odpowiada wynikom `sizeof` i rozmiarom obiektów, lecz nie jest naturalnym typem dla różnic mogących być ujemne. Sufiks `z` dodany w C++23 pozwala tworzyć literały związane z typem rozmiaru; `uz` daje `std::size_t`. Sam większy typ nie zastępuje sprawdzania przepełnienia na niezaufanych danych.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Dokładna szerokość typu nie określa kolejności bajtów, wyrównania ani formatu transmisji. Nawet używając `std::uint32_t`, serializuj protokół zgodnie z jego kolejnością bajtów. Dla przenośnej reprezentacji znaku oddziel kodowanie tekstu od signedness typu `char`.
+
+**Ćwiczenie.** Dlaczego `double result = 5 / 2;` daje dwa zamiast dwa i pół? Jak uzyskać wynik ułamkowy?
+
+**Odpowiedź.** Najpierw odbywa się dzielenie dwóch `int`, które obcina część ułamkową w kierunku zera. Dopiero dwa jest zamieniane na `double`. Zapis `5.0 / 2` lub konwersja jednego operandu przed dzieleniem powoduje obliczenie zmiennoprzecinkowe.
+
+Źródła: [literały całkowite](https://timsong-cpp.github.io/cppwp/n4950/lex.icon), [typy podstawowe](https://timsong-cpp.github.io/cppwp/n4950/basic.fundamental), [literały napisowe](https://timsong-cpp.github.io/cppwp/n4950/lex.string).
 
 ## Powiązane tematy
 

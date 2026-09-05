@@ -39,40 +39,67 @@ Ukryty friend (*hidden friend*) definiowany wewnątrz klasy jest znajdowany gł�
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Namespaces, visibility i ADL”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz odnalezienie deklaracji, przetworzenie zależności, utworzenie plików obiektowych, rozwiązanie symboli i złożenie końcowego artefaktu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel zależność źródłową, wymaganie użycia biblioteki, szczegół ABI oraz ustawienie prywatne konkretnego targetu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź graf targetów, pełne komendy kompilacji, tablicę symboli, kolejność linkowania i zawartość pakietu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W wywołaniu `swap(first, second)` nazwa jest niekwalifikowana. Zwykłe wyszukiwanie znajduje deklaracje wprowadzone przez `using std::swap`. ADL dodaje kandydatów z przestrzeni powiązanej z typem `geometry::Point`, więc znajduje również `geometry::swap`. Następnie rozstrzyganie przeciążeń wybiera najlepszą funkcję. Wewnątrz własnego swap pola są liczbami, dlatego standardowy wariant stanowi odpowiedni fallback.
 
-Model dla tej części kompendium jest następujący: Projekt C++ jest grafem jednostek translacji, modułów, bibliotek i artefaktów. Kompilator analizuje jednostki osobno, linker łączy definicje, a system budowania musi odtworzyć zależności i opcje w sposób powtarzalny. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Zapis `std::swap(first, second)` jest kwalifikowany i nie uruchamia tego samego wyszukiwania ADL. Może użyć generycznych operacji przeniesienia zamiast wyspecjalizowanej funkcji obok typu. Różnica bywa istotna dla kosztu i gwarancji wyjątków. Z kolei `using namespace geometry` nie jest potrzebne do ADL: mechanizm opiera się na typach argumentów, a nie na wcześniejszym imporcie nazw przez klienta.
+
+Wyszukiwanie nazwy i wybór przeciążenia to dwa różne etapy. Najpierw powstaje zbiór kandydatów, a dopiero potem porównuje się dopasowania. Dostęp `private` nie jest wygodnym filtrem usuwającym niepożądane przeciążenia na początku całego procesu. Również eksport symbolu z biblioteki dynamicznej nie ma wpływu na to, którą funkcję znajdzie semantyczne wyszukiwanie w kodzie źródłowym.
 
 ## Pogłębienie mechanizmu
 
-- ADL dodaje do wyszukiwania funkcje z przestrzeni skojarzonych z typami argumentów. Hidden friend wykorzystuje tę regułę, udostępniając operację tylko wtedy, gdy uczestniczy odpowiedni typ.
-- Vtable i key function są elementami ABI implementacji, nie normatywną reprezentacją standardu. Ukryta visibility zmniejsza publiczną powierzchnię symboli i umożliwia optymalizacje, ale musi być spójna z eksportowanym API.
+Powiązane encje dla klasy szablonowej mogą obejmować typy argumentów szablonu. Dlatego argument `std::vector<geometry::Point>` może wciągnąć do ADL więcej przestrzeni niż sam zapis nazwy wektora sugeruje. Typy fundamentalne nie dodają własnych przestrzeni. Mechanizm ma też reguły blokujące, np. zwykłe wyszukiwanie znajdujące odpowiedni obiekt niebędący funkcją może wyłączyć ADL. Nie traktuj go jako bezwarunkowego „przeszukaj wszystkie namespace”.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Namespaces, visibility i ADL” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Hidden friend zdefiniowany w klasie jest funkcją niezależną, choć ma dostęp do prywatnych składowych. Należy do otaczającej przestrzeni nazw, ale bez dodatkowej deklaracji zwykle nie jest widoczny przez zwykłe kwalifikowane wyszukiwanie. ADL udostępnia go wtedy, gdy argument powiązuje wywołanie z klasą. Ogranicza to przypadkowe kandydatury i dobrze działa dla symetrycznych operatorów.
+
+Alias przestrzeni nazw nie tworzy nowego zestawu encji: `namespace geo = geometry;` daje drugą nazwę tej samej przestrzeni. `inline namespace` pozwala kontrolować wersjonowanie źródłowego interfejsu i lookup, ale samo nie gwarantuje zgodności ABI starych binariów. Anonimowa przestrzeń nazw w nagłówku tworzy oddzielne encje w każdej jednostce, co może być niepożądane dla typów używanych w publicznym interfejsie.
+
+W szablonach zależne wywołania funkcji podlegają zasadom wyszukiwania w dwóch fazach. Część informacji jest ustalana przy definicji szablonu, a ADL może uwzględnić powiązane deklaracje przy instancjacji. Dopisywanie przypadkowej funkcji później do globalnego zakresu nie jest niezawodnym sposobem dostosowania istniejącego szablonu. Umieszczaj legalne punkty dostosowania w przestrzeni typu albo korzystaj z konkretnego protokołu biblioteki.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Operator porównania jako hidden friend otrzymuje dostęp do prywatnej reprezentacji, a klient używa zwykłej składni wartościowej.
 
-~~~text
-Temat: Namespaces, visibility i ADL
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <utility>
+
+namespace billing {
+class Amount {
+    int cents_;
+public:
+    explicit Amount(int cents) : cents_(cents) {}
+    int cents() const noexcept { return cents_; }
+    friend bool operator==(const Amount&, const Amount&) = default;
+    friend void swap(Amount& a, Amount& b) noexcept {
+        using std::swap;
+        swap(a.cents_, b.cents_);
+    }
+};
+}
+
+template<class T>
+void exchange_values(T& a, T& b) {
+    using std::swap;
+    swap(a, b);
+}
+
+int main() {
+    billing::Amount a{100}, b{250};
+    exchange_values(a, b);
+    assert(a == billing::Amount{250});
+    assert(b.cents() == 100);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Szablon nie zna nazwy `billing`, lecz typ argumentów wystarcza do znalezienia właściwej funkcji. `explicit` zapobiega niejawnej zamianie dowolnej liczby na kwotę. Nie potrzebujemy otwierać `namespace std`, aby zapewnić poprawne dostosowanie `swap`. Rozszerzanie przestrzeni standardowej jest silnie ograniczone i należy robić je tylko tam, gdzie specyfikacja wyraźnie na to pozwala.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Namespaces, visibility i ADL”, oceniaj hermetyczność, szybkość przebudowy, przenośność konfiguracji, kontrola publicznych zależności i zgodność ABI. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Używaj kwalifikowanych nazw, gdy chcesz jednoznacznie wskazać konkretną funkcję. Używaj niekwalifikowanego wywołania z kontrolowanym fallbackiem, gdy projektujesz punkt dostosowania przez ADL. W publicznym nagłówku unikaj globalnych dyrektyw `using namespace`; decyzja o skróceniu nazw powinna należeć do użytkownika nagłówka. Dla nowoczesnych bibliotek ranges warto poznać ich obiekty punktów dostosowania, które mają własny uporządkowany protokół wyboru.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `namespace internal` ukrywa symbole przed użytkownikiem biblioteki? **Odpowiedź:** nie. To nazwa i konwencja organizacyjna. Ukrycie na poziomie kompilacji wymaga odpowiedniego interfejsu i linkage, a eksport binarny zależy od narzędzi platformy. Klient mający widoczną deklarację może odwołać się do takiej przestrzeni.
+
+Źródła reguł: [C++23: ADL](https://timsong-cpp.github.io/cppwp/n4950/basic.lookup.argdep), [przestrzenie nazw](https://timsong-cpp.github.io/cppwp/n4950/namespace.def), [wyszukiwanie nazw zależnych](https://timsong-cpp.github.io/cppwp/n4950/temp.dep.candidate).
 
 ## Powiązane tematy
 

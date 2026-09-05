@@ -40,39 +40,70 @@ Destruktor jest generowany automatycznie, jeśli nie trzeba specjalnego zachowan
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Konstruktory i destruktory”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz wybór konstruktora, inicjalizację podobiektów, wykonanie operacji publicznej i destrukcję w odwrotnej kolejności. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij relację typu, współdzielenie implementacji i dynamiczny polimorfizm od zwykłej kompozycji obiektów. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź inwariant przed i po metodzie, wygenerowane funkcje specjalne, wywołany override oraz koszt reprezentacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Przy konstrukcji najbardziej pochodnego obiektu najpierw inicjalizowane są bazy wirtualne, potem bezpośrednie bazy w kolejności deklaracji, następnie niestatyczne pola w kolejności deklaracji i wreszcie wykonywane jest ciało konstruktora. Kolejność wpisów po dwukropku nie zmienia tej sekwencji. Dlatego pole zależne od innego musi być zadeklarowane po nim, a nie jedynie później wymienione na liście inicjalizacyjnej.
 
-Model dla tej części kompendium jest następujący: Klasa definiuje inwariant i zestaw operacji, które mogą go zachować. Ukrywanie pól jest środkiem, nie celem: interfejs powinien utrudniać utworzenie stanu nieważnego, a destrukcja i kopiowanie muszą odpowiadać semantyce reprezentowanego obiektu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W `Account` najpierw powstaje `owner_`, potem `balance_`, a ciało konstruktora jest puste. Konstruktor delegujący `Account()` wybiera drugi konstruktor tej samej klasy. Konstruktor docelowy odpowiada za wszystkie bazy i pola, a ciało delegującego wykonuje się później. Nie można równocześnie delegować i osobno wymieniać kolejnych inicjalizatorów pól.
+
+Inicjalizacja pola różni się od przypisania w ciele. Jeśli napis najpierw zostanie domyślnie skonstruowany, a potem otrzyma wartość przez przypisanie, są to dwie operacje na jego życiu. Bezpośrednia inicjalizacja od razu buduje właściwą wartość. Pola referencyjne i stałe wymagają inicjalizacji; zwykłe przypisanie w ciele nie może zastąpić ich utworzenia.
 
 ## Pogłębienie mechanizmu
 
-- Podobiekty są inicjalizowane według kolejności deklaracji w klasie, niezależnie od kolejności na liście inicjalizacyjnej. Delegating constructor pozwala skupić ustanowienie inwariantu w jednym miejscu.
+Inicjalizator domyślny pola jest używany, gdy dany konstruktor nie poda własnego inicjalizatora tego pola. Ułatwia wspólną wartość domyślną, lecz nie zmienia kolejności. `int count{};` zapewnia zero przy takim użyciu, podczas gdy nieinicjalizowany zwykły `int` może mieć wartość indeterminate. Nie należy liczyć na przypadkowe wyzerowanie miejsca przez system operacyjny.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Konstruktory i destruktory” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Jeżeli inicjalizacja drugiego pola rzuci, pierwsze w pełni skonstruowane pole jest niszczone. Ciało konstruktora nie rozpoczyna się, a destruktor całej klasy nie wykonuje się. Gdy wyjątek pochodzi z ciała, wszystkie wcześniej skonstruowane pola i bazy również są sprzątane. To powód, dla którego zasoby należy od razu umieszczać w polach RAII.
+
+Destrukcja zaczyna się od ciała destruktora najbardziej pochodnej klasy. W tym momencie jej pola jeszcze istnieją. Następnie niszczone są pola w odwrotnej kolejności i bazy; bazy wirtualne na końcu obsługuje najbardziej pochodny obiekt. Gdy trwa konstruktor albo destruktor bazy, wywołania wirtualne dotyczą odpowiedniego etapu hierarchii, nie kompletnej przyszłej lub już rozebranej klasy pochodnej.
+
+Konstruktor nie ma typu zwracanego i nie może być wirtualny. Wybór konkretnego typu obiektu musi poprzedzać rozpoczęcie konstrukcji. Polimorficzne tworzenie zwykle realizuje fabryka zwracająca właściciela interfejsu. Destruktor może być wirtualny, ponieważ typ dynamiczny już istniejącego obiektu pozwala dobrać prawidłowe sprzątanie.
+
+Deklaracja zwykłego konstruktora może wyłączyć automatyczne dostarczenie konstruktora domyślnego. `= default` przywraca żądaną operację tylko wtedy, gdy pola i bazy pozwalają ją wykonać. Referencja bez inicjalizatora może spowodować, że domyślna konstrukcja będzie usunięta. Ponadto `T object();` jest deklaracją funkcji, nie tworzeniem obiektu; zapis `T object{};` unika tej niejednoznaczności.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Stała tablica dziennika umożliwia prześledzenie zdarzeń bez dodatkowych alokacji. Program potwierdza, że pola kończą życie dopiero po ciele destruktora właściciela.
 
-~~~text
-Temat: Konstruktory i destruktory
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
+
+struct Log {
+    std::array<int, 5> events{};
+    std::size_t size{};
+    void push(int event) noexcept { events[size++] = event; }
+};
+struct Part {
+    Log& log;
+    int id;
+    Part(Log& output, int number) : log{output}, id{number} { log.push(id); }
+    ~Part() { log.push(-id); }
+};
+struct Whole {
+    Log& log;
+    Part first;
+    Part second;
+    explicit Whole(Log& output) : log{output}, first{output, 1}, second{output, 2} {}
+    ~Whole() { log.push(0); }
+};
+
+int main() {
+    Log log;
+    { Whole object{log}; }
+    assert((log.events == std::array{1, 2, 0, -2, -1}));
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Zero oznacza ciało destruktora `Whole`, a ujemne identyfikatory destruktory pól. `Log` żyje dłużej od wszystkich rejestrujących obiektów, więc odwołania używane podczas sprzątania pozostają ważne. Gdyby logger był polem deklarowanym po elementach, kolejność jego życia wymagałaby innego projektu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Konstruktory i destruktory”, oceniaj siła inwariantu, value semantics, prostota własności, testowalność i stabilność publicznego kontraktu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Umieszczaj reprezentację od elementów niezależnych do zależnych, a listę inicjalizacyjną zapisuj w kolejności deklaracji. Pozwala to łatwo porównać kod z rzeczywistym przebiegiem. Wspólne wartości początkowe wpisuj przy polach, wspólną walidację skupiaj w konstruktorze docelowym lub fabryce. Nie publikuj `this` odbiorcom, którzy mogą użyć obiektu przed ukończeniem inwariantu.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** W klasie zadeklarowano `int second_; int first_;`, a konstruktor ma listę `first_{7}, second_{first_}`. Czy kolejność zapisu zapewnia siedem w obu polach?
+
+**Odpowiedź.** Nie. `second_` inicjalizuje się pierwsze i próbuje czytać jeszcze niezainicjalizowane `first_`. Należy zmienić kolejność deklaracji albo uniezależnić inicjalizatory. Ostrzeżenie o kolejności inicjalizacji wskazuje realny problem semantyczny.
+
+Źródła: [inicjalizacja baz i pól](https://timsong-cpp.github.io/cppwp/n4950/class.base.init), [destruktory](https://timsong-cpp.github.io/cppwp/n4950/class.dtor), [konstruktory](https://timsong-cpp.github.io/cppwp/n4950/class.ctor).
 
 ## Powiązane tematy
 

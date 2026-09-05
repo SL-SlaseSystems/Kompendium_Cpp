@@ -31,43 +31,65 @@ Identyfikatory rozpoczynające się podkreśleniem i wielką literą oraz nazwy 
 
 ## Inicjalizacja
 
-Deklaracja lokalnej zmiennej typu podstawowego bez inicjalizatora może pozostawić wartość indeterminate. Czytanie jej może prowadzić do błędnego programu lub UB zależnie od kontekstu i wersji standardu. Inicjalizuj obiekty przy deklaracji, najlepiej nawiasami klamrowymi, gdy chcesz blokować konwersje zawężające.
+Zwykła lokalna zmienna `int` bez inicjalizatora ma w C++23 wartość indeterminate; jej odczyt prowadzi do undefined behavior. Szczególne wyjątki dotyczą pewnych operacji na typach bajtowych, nie zwykłych obliczeń na `int`. Inicjalizuj obiekty przy deklaracji, najlepiej nawiasami klamrowymi, gdy chcesz blokować konwersje zawężające.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Leksemy, deklaracje i zakresy”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Kompilator najpierw rozpoznaje tokeny, a potem interpretuje ich układ jako deklaracje i wyrażenia. Biały znak zwykle tylko oddziela tokeny, lecz `long long` musi pozostać dwoma słowami, a `++` jest jednym operatorem. Komentarz nie tworzy zakresu. Dyrektywy preprocessora działają wcześniej niż analiza typów: makro nie respektuje prywatności klasy ani zwykłych reguł wyszukiwania nazw.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W pierwszym programie deklaracja `twice` informuje, jakie wywołanie jest dozwolone. Następująca po niej definicja dostarcza ciało tej samej funkcji. Gdy analizowane jest `twice(4)`, deklaracja musi już być osiągalna. Wewnętrzne `result` wprowadza nowy obiekt. Wyszukiwanie niekwalifikowane znajduje najbliższą pasującą deklarację, dlatego asercja wewnątrz bloku sprawdza dziesięć. Wyjście z bloku kończy życie wewnętrznego obiektu i odsłania nazwę zewnętrzną; nie przywraca żadnej zapisanej wcześniej wartości.
+
+Miejsce wprowadzenia nazwy może poprzedzać inicjalizator. Zapis `int x = x;` wewnątrz bloku nie kopiuje automatycznie zewnętrznego `x`: po prawej znajduje już nową zmienną. Dla zwykłego lokalnego `int` jest to w C++23 odczyt wartości indeterminate i prowadzi do UB. Ostrzeżenia o niezainicjalizowanych zmiennych są tu cenniejsze niż obserwowanie przypadkowego wyniku.
 
 ## Pogłębienie mechanizmu
 
-- Deklaracja wprowadza nazwę i jej znaczenie, a definicja dodatkowo dostarcza obiekt lub ciało wymagane przez program. Zakres określa widoczność nazwy, natomiast linkage decyduje, czy deklaracje z różnych jednostek mogą oznaczać ten sam byt.
+Zakres, powiązanie nazwy (*linkage*) i czas życia odpowiadają na trzy różne pytania. Lokalny `static` ma nazwę dostępną tylko w swoim bloku, ale jego obiekt może przetrwać wszystkie wywołania funkcji. Deklaracja `extern int count;` zwykle deklaruje obiekt zdefiniowany gdzie indziej; nie tworzy kolejnego licznika przy każdym dołączeniu nagłówka. Natomiast `extern int count = 1;` jest definicją, ponieważ zawiera inicjalizator.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Leksemy, deklaracje i zakresy” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Reguła jednej definicji, ODR, ogranicza sposób rozmieszczania definicji między jednostkami translacji. Zwykła niewbudowana zmienna globalna lub funkcja nie może otrzymać wielu zwykłych definicji w programie. Dla klas, szablonów i encji `inline` istnieją szczegółowe wyjątki, wymagające między innymi zgodności definicji. To powód, dla którego nagłówek nie jest dowolnym miejscem na definicję globalnego stanu.
+
+Kwalifikacja `config::limit` wskazuje przestrzeń nazw, a `::limit` globalny zakres. `using` może udostępniać konkretną nazwę lub tworzyć alias typu, lecz nie tworzy kopii obiektu. `using namespace` w nagłówku poszerza wyszukiwanie także w kodzie dołączającym ten nagłówek; konflikt może ujawnić się dopiero po dodaniu nowej biblioteki.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Poniższy licznik pokazuje, że widoczność nazwy i trwałość obiektu są niezależne. Obiekt `calls` inicjalizuje się raz, a każde wywołanie zwiększa ten sam stan.
 
-~~~text
-Temat: Leksemy, deklaracje i zakresy
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+
+namespace config {
+    inline constexpr int limit = 3;
+}
+
+int next_call() {
+    static int calls{};
+    return ++calls;
+}
+
+int main() {
+    int limit = 9;
+    assert(limit == 9);
+    assert(config::limit == 3);
+    assert(next_call() == 1);
+    if (const int call = next_call(); call < config::limit) {
+        assert(call == 2);
+    }
+    assert(next_call() == 3);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Nazwa `call` jest dostępna w warunku oraz obu gałęziach instrukcji `if`, ale nie po niej. `limit` w `main` nie zmienia obiektu `config::limit`. Kwalifikacja rozstrzyga wybór bez zmiany zakresu którejkolwiek deklaracji. Przykład nie jest licznikiem bezpiecznym dla równoczesnych modyfikacji z wielu wątków.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Leksemy, deklaracje i zakresy”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Deklaruj zmienną w najmniejszym zakresie obejmującym jej rzeczywiste użycia. W ten sposób kompilator pomaga wykrywać przypadkowy dostęp po zakończeniu potrzebnej operacji. Zamiast używać przesłaniania do zmiany znaczenia nazwy, nazwij kolejne etapy obliczenia, na przykład `raw_size` i `checked_size`. Dla publicznego API wybieraj własną przestrzeń nazw, aby ograniczyć kolizje z zależnościami.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Rozdzielając projekt na nagłówek i plik implementacji, umieść deklarację funkcji w nagłówku, a jedną definicję w pliku źródłowym. Definicje klas i szablonów zwykle muszą być dostępne użytkownikowi; nie wynika z tego, że każda zmienna globalna również powinna być definiowana w nagłówku. `inline constexpr` nadaje się do współdzielonej stałej od C++17.
+
+**Ćwiczenie.** Czy dwukrotne wywołanie funkcji zawierającej `static int n = 0; return ++n;` tworzy dwa obiekty? Czy można odwołać się do `n` z `main`?
+
+**Odpowiedź.** Jest jeden obiekt, a wyniki kolejnych wywołań to jeden i dwa. Nazwa pozostaje lokalna, więc bezpośredni zapis `n` w `main` go nie odnajdzie. Funkcja zapewnia dostęp do zachowania tego obiektu, nie poszerza zakresu jego nazwy.
+
+Reguły źródłowe: [zakresy nazw](https://timsong-cpp.github.io/cppwp/n4950/basic.scope), [deklaracje i definicje](https://timsong-cpp.github.io/cppwp/n4950/basic.def), [ODR](https://timsong-cpp.github.io/cppwp/n4950/basic.def.odr).
 
 ## Powiązane tematy
 

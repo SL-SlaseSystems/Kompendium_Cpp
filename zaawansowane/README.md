@@ -28,7 +28,13 @@ Każdy rozdział oddziela gwarancję abstract machine od konwencji ABI i heuryst
 
 ## Jak czytać przykłady
 
-Bloki `cpp` są bezpiecznymi, samowystarczalnymi jednostkami C++23 kompilowanymi przez walidator. `cpp,notest` pokazuje fragment zależny od ABI, przyszłego standardu albo celowo błędny przypadek i nie jest wykonywany ani kompilowany. Nigdy nie kopiuj takiego fragmentu bez odtworzenia jego założeń w swoim środowisku.
+Bloki `cpp` są samowystarczalnymi jednostkami C++23 kompilowanymi przez walidator. Ich komentarze i analiza podają warunki poprawnego użycia; sama kompilacja nie dowodzi braku UB dla dowolnych argumentów. `cpp,notest` pokazuje fragment zależny od ABI, przyszłego standardu albo celowo błędny przypadek i nie jest wykonywany ani kompilowany. Nigdy nie kopiuj takiego fragmentu bez odtworzenia jego założeń w swoim środowisku.
+
+## Jak utrwalać mechanizmy
+
+Po przeczytaniu przykładu przewidź wynik i wybrane przeciążenie przed kompilacją. Następnie zmień jeden warunek: const odbiorcy, kategorię wartości, lifetime źródła albo kolejność publikacji. Zapisz, czy zmiana oznacza inny zdefiniowany wynik, błąd kompilacji, niespełniony constraint czy naruszenie kontraktu wykonania. Dopiero wtedy porównaj przewidywanie z diagnostyką i źródłem reguły.
+
+W każdym rozdziale znajdziesz ćwiczenie z odpowiedzią. Dłuższy projekt powinien łączyć małą liczbę poznanych mechanizmów: na przykład parser posiadający arenę PMR i zwracający widoki o wyraźnym lifetime albo bibliotekę z opaque handle i adapterem RAII. Wyszukiwaniu konkretnych technik służy [katalog 150 mechanizmów](../150-zaawansowanych-mechanizmow-cpp.md).
 
 ## Powiązane tematy
 

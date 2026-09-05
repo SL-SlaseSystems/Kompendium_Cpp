@@ -33,43 +33,68 @@ Analiza statyczna nie widzi wszystkich danych runtime i może zgłaszać false p
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Ostrzeżenia i analiza statyczna”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz sformułowanie hipotezy, przygotowanie kontrolowanego wejścia, zebranie wyniku, porównanie z oczekiwaniem i zachowanie reprodukcji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd funkcjonalny, undefined behavior, problem przenośności i regresję wydajności, ponieważ wymagają innych narzędzi. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przypadek, kod wyjścia, raport sanitizera, statystyczny rozkład pomiarów i konfigurację kompilacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Kompilator najpierw analizuje program w konkretnej konfiguracji: z określonym standardem, makrami i ścieżkami nagłówków. Ostrzeżenie dotyczy tej wersji jednostki translacji. Jeżeli projekt kompiluje osobne ścieżki przez `#ifdef`, pojedynczy build nie obejmuje wszystkich wariantów. `-Wall` jest nazwą zestawu wybranego przez autorów kompilatora, a nie obietnicą włączenia dosłownie wszystkich możliwych ostrzeżeń.
 
-Model dla tej części kompendium jest następujący: Żadne pojedyncze narzędzie nie dowodzi poprawności programu C++. Test sprawdza zachowanie dla danych, analiza statyczna szuka wzorców, sanitizer obserwuje wykonanie, a profiler mierzy koszt; wiarygodność daje dopiero połączenie niezależnych dowodów. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Czytając ostrzeżenie o konwersji, ustal dziedzinę źródła i celu. Zmiana `int` na `size_t` nie naprawia automatycznie sytuacji, gdy ujemna liczba oznacza błąd. Najpierw trzeba sprawdzić znak lub użyć typu wynikowego. Dopiero potem konwersja może być uzasadniona. Rzutowanie wyciszające komunikat bez zmiany kontraktu często tylko ukrywa problem przed kolejną osobą.
+
+Dla clang-tidy dostarcz rzeczywistą bazę komend kompilacji. Plik `compile_commands.json` opisuje parametry potrzebne do poprawnego parsowania każdej jednostki. Bez niego analizator może widzieć inne makra, brakujące nagłówki albo inny standard niż build produkcyjny. W CMake bazę można generować przez `CMAKE_EXPORT_COMPILE_COMMANDS`, z uwzględnieniem wsparcia konkretnego generatora.
 
 ## Pogłębienie mechanizmu
 
-- Wysoki poziom ostrzeżeń wykrywa podejrzane konstrukcje podczas kompilacji, a analizator statyczny śledzi ścieżki, ownership i przepływ danych szerzej. Ostrzeżenia projektu warto traktować jako błędy, z kontrolowanymi wyjątkami dla kodu zewnętrznego.
+Diagnostyka kompilatora obejmuje błędy wymagające odrzucenia programu oraz opcjonalne ostrzeżenia o konstrukcjach ryzykownych lub nieprzenośnych. Brak ostrzeżeń nie oznacza braku UB: wiele naruszeń wymaga danych runtime albo analizy całego systemu. Z kolei ostrzeżenie nie zawsze oznacza błąd standardu. Trzeba rozróżniać regułę języka, heurystykę narzędzia i konwencję projektu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Ostrzeżenia i analiza statyczna” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Analiza ścieżek śledzi możliwe stany, np. czy wskaźnik może być null po serii warunków. Gdy brakuje modeli zewnętrznych funkcji, wynik może być zbyt ostrożny albo przeoczyć rzeczywistą zależność. Analizator operujący na jednej jednostce ma inne możliwości niż narzędzie międzyproceduralne korzystające z całego projektu. Zestaw checks dotyczących stylu nie zastępuje analizy przepływu zasobów.
+
+Włączanie `-Werror` w kontrolowanym CI zapobiega narastaniu ostrzeżeń, ale nowa wersja kompilatora może rozszerzyć diagnostykę. Aktualizację toolchainu traktuj jako zmianę wymagającą przeglądu. Publiczna biblioteka nie powinna narzucać klientowi wszystkich prywatnych ostrzeżeń jako wymagań interfejsu. Zewnętrzny kod można analizować oddzielnie, zachowując własne rygorystyczne ustawienia bez masowego wyciszania całego programu.
+
+Automatyczna poprawka clang-tidy jest propozycją zmiany kodu. Może naruszyć intencję, szczególnie gdy przekształca własność, konstrukcję obiektu lub granicę API. Przejrzyj diff i uruchom właściwe testy. Jeśli ostrzeżenie jest uzasadnionym wyjątkiem, stosuj lokalne wyciszenie konkretnego checka z wyjaśnieniem. Ogólne „ignore all” usuwa również ochronę przed przyszłymi błędami tego miejsca.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Sprawdzana konwersja jest lepszą odpowiedzią na ostrzeżenie niż samo dodanie castu. C++20 `std::in_range` porównuje reprezentowalne zakresy obsługiwanych typów całkowitych bez kłopotliwego ręcznego mieszania znaków.
 
-~~~text
-Temat: Ostrzeżenia i analiza statyczna
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <limits>
+#include <optional>
+#include <utility>
+
+std::optional<int> count_as_int(std::size_t count) {
+    if (!std::in_range<int>(count)) return std::nullopt;
+    return static_cast<int>(count);
+}
+
+int main() {
+    assert(count_as_int(42) == 42);
+    const auto huge = std::numeric_limits<std::size_t>::max();
+    if (!std::in_range<int>(huge)) {
+        assert(!count_as_int(huge));
+    }
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Konwersja jest wykonywana dopiero po sprawdzeniu. Test skrajnej wartości pozostaje warunkowy, ponieważ relacje szerokości typów należą do implementacji; nie zakładamy mechanicznie, że `size_t` ma zawsze 64 bity. W realnym API warto też zapytać, dlaczego odbiorca żąda `int` i czy nie lepiej zachować naturalny typ liczności przez cały przepływ.
+
+~~~text
+# Przykład dla CMake z generatorem Ninja i zainstalowanym clang-tidy:
+cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+clang-tidy src/parser.cpp -p build \
+  -checks='-*,clang-analyzer-*,bugprone-*'
+~~~
+
+Lista checków jest punktem startowym do przeglądu, nie uniwersalnym standardem jakości. Nazwy i dostępność konkretnych reguł zależą od wersji narzędzia. W repozytorium utrwal przemyślaną konfigurację `.clang-tidy`, aby lokalna analiza i CI odpowiadały sobie.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Ostrzeżenia i analiza statyczna”, oceniaj zdolność wykrycia realnej regresji, powtarzalność, koszt utrzymania testu i reprezentatywność środowiska. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Ostrzeżenia działają szybko i warto wykonywać je przy każdym buildzie. Analiza statyczna może kosztować więcej, ale bada również ścieżki niewykonane w testach. Sanitizery obserwują realne wykonanie i uzupełniają tę perspektywę. Najbardziej użyteczna konfiguracja daje komunikaty, które zespół naprawdę przegląda, zamiast tysięcy permanentnie ignorowanych zgłoszeń.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `static_cast<unsigned>(negative)` eliminuje problem ujemnego wejścia? **Odpowiedź:** nie, wynik konwersji jest określony regułami typu bez znaku, ale może nie mieć oczekiwanego znaczenia domenowego. Najpierw trzeba zdecydować, czy ujemna wartość jest błędem, znacznikiem czy legalną liczbą. Poprawność języka i poprawność zadania to osobne kwestie.
+
+Źródła: [Clang: opcje diagnostyczne](https://clang.llvm.org/docs/UsersManual.html), [clang-tidy](https://clang.llvm.org/extra/clang-tidy/), [baza komend kompilacji](https://clang.llvm.org/docs/JSONCompilationDatabase.html).
 
 ## Powiązane tematy
 
 - [Kompilatory i toolchain](../01_wprowadzenie/03_kompilatory_i_toolchain.md)
 - [Sanitizery i debugowanie](03_sanitizery_i_debuggery.md)
 - [C++ Core Guidelines](../zrodla.md)
-

@@ -21,45 +21,94 @@ task<Response> fetch(Client& client) {
 
 Typ zwracany wybiera `promise_type`. Kompilator tworzy frame, wywołuje `get_return_object`, `initial_suspend`, a przy końcu `final_suspend`. Wyrażenie `co_await` jest przekształcane do awaitera z metodami `await_ready`, `await_suspend` i `await_resume`. Szczegóły są opisane w dziale zaawansowanym.
 
-Zawieszenie nie tworzy automatycznie nowego wątku. To awaiter/executor decyduje, kiedy i gdzie nastąpi wznowienie. Dane referencyjne przechowywane w frame muszą żyć wystarczająco długo. Zniszczenie uchwytu kończy frame; biblioteka musi precyzyjnie określić własność coroutine handle.
+Zawieszenie nie tworzy automatycznie nowego wątku. To awaiter/executor decyduje, kiedy i gdzie nastąpi wznowienie. Dane referencyjne przechowywane w frame muszą żyć wystarczająco długo. Właściciel ramki odpowiada za jej zniszczenie przez `destroy()` w legalnym stanie zawieszenia; destruktor samego `std::coroutine_handle` nie zwalnia ramki. Biblioteka musi precyzyjnie określić własność.
 
 Anulowanie jest kooperacyjne i wymaga kontraktu cancellation safety. Operacja przerwana w połowie nie może zgubić odpowiedzi, blokady lub bajtów protokołu w sposób mylący kolejne wywołanie.
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Korutyny”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz identyfikację wymaganej funkcji, sprawdzenie feature-test macro, wybór implementacji i weryfikację na wszystkich wspieranych toolchainach. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel wersję języka ustawioną flagą od faktycznej implementacji funkcji i dostępności odpowiedniego komponentu biblioteki standardowej. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wartość makra funkcji, wynik kompilacji minimalnego przykładu, status implementacji i test na najstarszym wspieranym narzędziu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie korutyny przygotowuje jej stan i obiekt zwrotny. Parametry przekazane przez wartość mogą znaleźć się w ramce jako posiadane wartości; referencje nadal odnoszą się do cudzych obiektów. `initial_suspend` decyduje, czy ciało zacznie działać od razu. Jeżeli zwraca `suspend_always`, użytkownik otrzymuje korutynę oczekującą na pierwsze wznowienie.
 
-Model dla tej części kompendium jest następujący: Edycje standardu dodają język i bibliotekę, lecz ich obecność w dokumencie nie oznacza kompletnego wsparcia toolchainu. Kod produkcyjny potrzebuje macierzy kompilator–biblioteka–platforma oraz polityki fallbacku. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Gdy wykonanie dociera do `co_await`, awaiter odpowiada, czy wynik jest już gotowy. Jeśli tak, zawieszenie może nie nastąpić. W przeciwnym przypadku mechanizm zawieszenia pozwala przekazać sterowanie i ustalić dalsze wznowienie. Po wznowieniu `await_resume` dostarcza wynik albo zgłasza błąd zgodnie z własnym kontraktem. Samo wystąpienie słowa `co_await` nie oznacza utworzenia wątku.
+
+Po `co_return` korutyna dochodzi do `final_suspend`. Jeżeli pozostaje tam zawieszona, jej ramka nadal istnieje, mimo że ciało zakończyło obliczenia. Właściciel musi ją później zniszczyć. Zakończenie obliczeń, wznowienie i zniszczenie ramki to trzy różne operacje.
 
 ## Pogłębienie mechanizmu
 
-- Korutyna jest transformowana do maszyny stanów z ramką przechowującą parametry i lokale żyjące przez zawieszenie. Typ zwracany oraz `promise_type` definiują protokół, a sam język nie dostarcza schedulera.
+`std::coroutine_handle` jest niskopoziomowym uchwytem, którego destruktor sam nie zwalnia ramki. Potrzebny jest typ RAII kodujący własność. Skopiowanie uchwytu nie tworzy drugiej korutyny; tworzy kolejną drogę dostępu do tej samej ramki. Dwóch właścicieli wywołujących `destroy()` doprowadzi do błędu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Korutyny” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Ramka może zawierać parametry, lokalne obiekty potrzebne po zawieszeniu, promise i informację o miejscu wznowienia. Często wymaga alokacji, choć implementacja może ją eliminować w określonych warunkach. Nie należy oceniać kosztu korutyny wyłącznie na podstawie krótkiego ciała funkcji. Długo żyjący bufor lokalny może zwiększyć rozmiar każdej jednocześnie istniejącej operacji.
+
+Wyjątki pochodzące z ciała trafiają do `unhandled_exception`. Biblioteka może zachować `exception_ptr` i przekazać błąd odbiorcy albo zakończyć proces według własnej polityki. Sam język nie wybiera za autora aplikacji uniwersalnego kanału błędów. Anulowanie również wymaga umowy: trzeba wiedzieć, co dzieje się z rozpoczętym I/O i kto jeszcze może wznowić korutynę.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <cassert>
+#include <coroutine>
+#include <exception>
+#include <utility>
 
-~~~text
-Temat: Korutyny
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+class StepTask {
+public:
+    struct promise_type {
+        std::exception_ptr error;
+        StepTask get_return_object() {
+            return StepTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { error = std::current_exception(); }
+    };
+    using Handle = std::coroutine_handle<promise_type>;
+    explicit StepTask(Handle handle) noexcept : handle_{handle} {}
+    StepTask(const StepTask&) = delete;
+    StepTask& operator=(const StepTask&) = delete;
+    StepTask(StepTask&& other) noexcept : handle_{std::exchange(other.handle_, {})} {}
+    ~StepTask() { if (handle_) handle_.destroy(); }
+
+    bool resume() {
+        if (!handle_ || handle_.done()) return false;
+        handle_.resume();
+        if (handle_.promise().error) std::rethrow_exception(handle_.promise().error);
+        return !handle_.done();
+    }
+private:
+    Handle handle_;
+};
+
+StepTask stages(int& state) {
+    state = 1;
+    co_await std::suspend_always{};
+    state = 2;
+}
+
+int main() {
+    int state = 0;
+    auto task = stages(state);
+    assert(state == 0);
+    const bool paused = task.resume();
+    assert(paused && state == 1);
+    const bool more = task.resume();
+    assert(!more && state == 2);
+    assert(!task.resume());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwsze wywołanie `resume` dochodzi do jawnego zawieszenia. Drugie kończy ciało i zatrzymuje korutynę na `final_suspend`. Destruktor `task` usuwa ramkę. `state` zostało utworzone wcześniej, więc żyje przez całe użycie korutyny. Przykład jest sterowany ręcznie w jednym wątku; równoczesne wywołania `resume` lub `destroy` nie są obsługiwane przez ten typ.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Korutyny”, oceniaj wartość funkcji dla projektu, dojrzałość implementacji, koszt fallbacku, wpływ na ABI oraz termin wsparcia toolchainu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Do prostego synchronicznego przetwarzania pętla bywa wystarczająca. Korutyna pomaga, gdy naturalny opis algorytmu musi zachować lokalny stan pomiędzy kolejnymi żądaniami wyniku lub etapami oczekiwania. C++23 dodaje `std::generator` dla określonego modelu synchronicznego generowania wartości; nie jest on uniwersalnym typem asynchronicznego zadania.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Dla aplikacji sieciowej zwykle wybierz bibliotekę określającą scheduler, anulowanie i własność operacji. Samodzielny typ zadania jest dobrym ćwiczeniem mechaniki, ale wymaga znacznie szerszego projektu, zanim stanie się podstawą wykonania aplikacji. Szczególnie ważne jest, by callback nie próbował wznowić ramki już zniszczonej przy anulowaniu.
+
+## Ćwiczenie z odpowiedzią
+
+Co stanie się po zniszczeniu `task` tuż po pierwszym wznowieniu? Ramka zostanie zwolniona bez wykonania pozostałej części ciała, więc `state` pozostanie równe 1. Dlaczego nie można potem użyć zachowanej kopii surowego uchwytu? Wskazywałaby na ramkę, która już nie istnieje. `done()` także nie jest metodą sprawdzania ważności dowolnego wiszącego uchwytu.
+
+Podstawa transformacji: [C++23, coroutine definitions](https://timsong-cpp.github.io/cppwp/n4950/dcl.fct.def.coroutine).
 
 ## Powiązane tematy
 

@@ -32,39 +32,65 @@ C++23 dodaje kilka adapterów i usprawnień, lecz wsparcie konkretnej biblioteki
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Ranges i views”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie zakresu, wykonanie operacji zgodnie z wymaganiami iteratora i aktualizację stanu kontenera wraz z regułami invalidacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba odróżnij właściciela elementów od widoku, kolejność logiczną od fizycznego układu i gwarancję złożoności od konkretnego czasu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź rozmiar i capacity, ważność iteratorów, liczbę alokacji, kolejność elementów oraz klasę złożoności. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Utworzenie pipeline przechowuje zakres bazowy oraz obiekty predykatu i transformacji. Przy rozpoczęciu iteracji filtr szuka pierwszego elementu spełniającego warunek, czyli liczby dwa. Dereferencja iteratora transformacji oblicza cztery. Inkrementacja przechodzi do następnego elementu spełniającego filtr, czyli cztery, a kolejna dereferencja daje szesnaście. Dopiero `push_back` zapisuje obliczoną wartość w kontenerze wynikowym.
 
-Model dla tej części kompendium jest następujący: Kontenery i algorytmy biblioteki standardowej mają kontrakty dotyczące złożoności, invalidacji, własności oraz zakresów. Poprawny wybór wynika z wymaganych operacji i stabilności adresów, nie z przyzwyczajenia do jednego kontenera. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Leniwość nie oznacza, że każda operacja zawsze kosztuje tyle samo ani że żaden adapter nigdy nie wykonuje przygotowania. Dla `filter_view` nad forward range pierwsze wyszukanie początku może być buforowane wewnątrz widoku. Transformacja zwykle następuje przy dereferencji, więc dwa odczyty tej samej pozycji mogą ponownie uruchomić funkcję. Nie projektuj kodu tak, aby poprawność zależała od dokładnej liczby jej wywołań.
+
+Kolejność adapterów zmienia znaczenie i koszt. `filter | take(3)` wybiera pierwsze trzy pasujące elementy, a `take(3) | filter` filtruje jedynie pierwsze trzy elementy wejścia. `transform | filter` może obliczać transformację także dla odrzucanych danych. Rozpisanie pracy dla kilku elementów pozwala wykryć różnicę bez zgadywania na podstawie wyglądu operatorów `|`.
 
 ## Pogłębienie mechanizmu
 
-- View jest zwykle leniwym i niewłaścicielskim opisem transformacji zakresu. Pipeline nie wykonuje pracy do chwili iteracji, a tymczasowy zakres może wymagać mechanizmu borrowed range, aby iterator nie stał się dangling.
+`view` jest zakresem spełniającym dodatkowe wymagania dotyczące przenoszenia i kosztów operacji na jego reprezentacji. Nie oznacza zawsze obiektu niewłaścicielskiego. Adapter zastosowany do lvalue wektora zwykle korzysta z `ref_view`, a odpowiedni rvalue wektora może zostać przejęty przez `owning_view`. Wyjątkowa ostrożność jest potrzebna dla `initializer_list`, którego obiekt opisowy nie staje się właścicielem trwałej tablicy tylko dlatego, że został skopiowany.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Ranges i views” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`borrowed_range` odpowiada na węższe pytanie: czy same iteratory mogą pozostać użyteczne po zniszczeniu obiektu zakresu? Dla `string_view` mogą, jeżeli nadal żyją znaki. Dla właścicielskiego wektora zniszczenie zakresu niszczy także elementy. Dlatego algorytm ranges zwracający iterator z niepożyczanego rvalue może zwrócić `std::ranges::dangling`; zapobiega to przypadkowemu dereferencjonowaniu wyniku o utraconym właścicielu.
+
+Nie każda właściwość źródła przetrwa adaptację. Filtr wektora nie zapewnia skoku do k-tego pasującego elementu w stałym czasie, więc traci random access oraz zwykle znany rozmiar. Transformacja może zachować dostęp losowy, ale zwracać wartości zamiast referencji. `const` zastosowane do obiektu widoku nie jest automatycznie odpowiednikiem widoku na stałe elementy. O dostępnej mutacji decyduje typ uzyskiwanej referencji oraz konstrukcja zakresu.
+
+Zakres nie musi być skończony. `views::iota(0)` tworzy sekwencję, którą należy ograniczyć przed algorytmem wymagającym dojścia do końca. `take(n)` ogranicza liczbę wyników, ale filtr umieszczony przed nim nadal może bez końca szukać kolejnego dopasowania, jeśli predykat nigdy go nie znajdzie. Granica pracy i granica liczby wyprodukowanych wartości nie są tym samym. Dla strumieni zewnętrznych trzeba dodatkowo uwzględnić błędy, czas oczekiwania i zatrzymanie źródła.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Funkcja może bezpiecznie zwrócić pipeline posiadający przeniesiony wektor. Utrwalać wynik trzeba dopiero wtedy, gdy potrzebna jest wielokrotna praca na gotowych danych.
 
-~~~text
-Temat: Ranges i views
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <ranges>
+#include <utility>
+#include <vector>
+
+auto positive_squares(std::vector<int> input) {
+    return std::views::all(std::move(input))
+        | std::views::filter([](int n) { return n > 0; })
+        | std::views::transform([](int n) { return n * n; });
+}
+
+int main() {
+    auto owned = positive_squares({-2, 1, 3});
+    std::vector<int> result;
+    for (int value : owned) {
+        result.push_back(value);
+    }
+    assert((result == std::vector<int>{1, 9}));
+
+    const std::vector<int> source{1, 2, 3, 4, 5};
+    auto first_two_even = source
+        | std::views::filter([](int n) { return n % 2 == 0; })
+        | std::views::take(2);
+    int sum = 0;
+    for (int n : first_two_even) sum += n;
+    assert(sum == 6);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Argument `input` jest wartością, a jawne przeniesienie oddaje jego bufor do zakresu właścicielskiego. Zwrócenie pipeline zbudowanego z samego `input` jako lvalue pozostawiłoby referencję do lokalnego wektora. Składnia funkcji wyglądałaby podobnie, lecz model czasu życia byłby zupełnie inny. Przykład ogranicza wartości tak, aby kwadraty mieściły się w `int`.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Ranges i views”, oceniaj wzorzec dostępu, lokalność danych, stabilność referencji, koszt modyfikacji i możliwość użycia gotowego algorytmu. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Widoki pomagają przy jednokrotnym przetwarzaniu, szczególnie gdy odrzucają większość danych albo kończą po znalezieniu kilku wyników. Materializacja jest korzystna, gdy obliczenia są kosztowne i powtarzane, wynik musi mieć stabilną własność lub interfejs wymaga ciągłego bufora. C++23 `ranges::to` upraszcza materializację, ale zwykła pętla pozostaje przejrzystym wariantem kompatybilnym ze starszymi bibliotekami.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy zmiana elementu wektora z nieparzystego na parzysty musi zostać zauważona przez istniejący `filter_view` dokładnie tak, jak przez nowo utworzony filtr? **Odpowiedź:** nie należy na tym polegać. Buforowany początek i wymagania iteratorów filtra komplikują mutowanie predykatu przez zmianę danych. Po takiej zmianie najczytelniej utworzyć widok ponownie; nie modyfikuj przez iterator filtra elementu tak, aby przestał spełniać predykat.
+
+Źródła reguł: [C++23: zakresy](https://timsong-cpp.github.io/cppwp/n4950/ranges), [filter_view](https://timsong-cpp.github.io/cppwp/n4950/range.filter), [borrowed_range](https://timsong-cpp.github.io/cppwp/n4950/range.range).
 
 ## Powiązane tematy
 

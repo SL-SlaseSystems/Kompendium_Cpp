@@ -35,40 +35,65 @@ Semantyczne wymagania standardowych concepts, np. equality preservation, mogą n
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Concept normalization i subsumption”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zapisanie założeń, wskazanie reguły standardu, prześledzenie konsekwencji dla programu i potwierdzenie hipotezy narzędziem właściwym dla implementacji. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oznacz gwarancję normatywną, ograniczenie platformy, konwencję ABI i aktualną strategię optymalizatora jako osobne źródła wiedzy. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź minimalny przykład, diagnostykę wielu kompilatorów, sanitizer, assembly lub profil oraz odniesienie do używanej wersji standardu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Dla wywołania `category(1)` parametr `T` jest `int`. Spełnione są zarówno `Numeric`, jak i `SignedNumeric`. Normalizacja drugiego conceptu rozwija ponowne użycie `Numeric<T>` i dokłada wymaganie `signed_integral<T>`. Wspólne ograniczenia pochodzą z tych samych definicji, więc bardziej ograniczone przeciążenie może zostać rozpoznane i zwrócić `2`.
 
-Model dla tej części kompendium jest następujący: Tematy eksperckie trzeba analizować na trzech poziomach: reguły abstract machine, obserwowalne zachowanie programu i szczegół implementacyjny kompilatora lub ABI. Optymalizacja może wykorzystywać gwarancje standardu, ale nie zamienia heurystyki w kontrakt języka. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Dla `unsigned int` warunek `signed_integral` jest niespełniony, więc drugiego kandydata nie ma wśród pasujących funkcji. Dla `double` spełnione jest `floating_point`, lecz nie `signed_integral`, bo ten drugi concept dotyczy typów całkowitych. Nazwa `SignedNumeric` jest zatem w przykładzie umowna: jej dokładny zapis ogranicza ją do całkowitych typów ze znakiem, a nie wszystkich liczb dopuszczających ujemne wartości.
 
 ## Pogłębienie mechanizmu
 
-- Concept nazywa predykat nad argumentami szablonu, a requires-expression sprawdza poprawność wymaganych operacji bez ich wykonywania. Ograniczenie powinno opisywać semantyczny kontrakt algorytmu, nie przypadkowe szczegóły implementacji.
-- Constraints są normalizowane do atomowych ograniczeń, a subsumption ustala, który przeciążony kandydat jest bardziej ograniczony. Logicznie równoważne wyrażenia zapisane niezależnie nie zawsze tworzą te same atomic constraints.
+Atomic constraint powstaje z wyrażenia i mapowania parametrów szablonu. Tożsamość nie oznacza po prostu, że dwa wyrażenia zwracają taką samą wartość. Dwa osobno zapisane `sizeof(T) > 1` mogą dać dwa różne atomy. Kompilator nie dowodzi też ogólnych implikacji arytmetycznych, na przykład że `sizeof(T) > 8` implikuje `sizeof(T) > 4`. Aby stworzyć przewidywalną hierarchię, buduj bardziej szczegółowy concept przez ponowne użycie nazwanego conceptu bazowego.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Concept normalization i subsumption” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Podczas normalizacji rozpatrywane są spójniki constraints i definicje concepts. Zwykłe wywołanie funkcji zwracającej `bool` pozostaje atomem; kompilator nie rozwija jej ciała jako logicznego dowodu. Schowanie `A<T> && B<T>` wewnątrz pomocniczej funkcji może więc zmienić subsumption mimo niezmienionego wyniku logicznego. Z tego powodu refaktoryzacja constraints wymaga sprawdzenia nie tylko akceptowanych typów, ale również wyboru przeciążeń.
+
+Sprawdzanie koniunkcji i alternatywy ma short-circuit. W `HasType<T> && Test<typename T::type>` lewy warunek może zatrzymać badanie prawego, gdy składowy typ nie istnieje. Jednak nie każdy problem da się w ten sposób osłonić: samo tworzenie niepoprawnych mapowań parametrów podczas normalizacji podlega osobnym regułom. Celowo konstruowane requirements niepoprawne dla wszystkich możliwych podstawień także nie są poprawną techniką zastępowania `false`.
+
+Concepty standardowe zawierają wymagania semantyczne. `regular_invocable` wymaga właściwości wykraczających poza samo istnienie `operator()`, a relacja porządkująca musi zachowywać odpowiednie prawa. Kompilator nie udowodni przechodniości komparatora dla wszystkich danych. `static_assert(std::strict_weak_order<Comp, T, T>)` bada część syntaktyczną kontraktu i nie legalizuje sortowania komparatorem, którego wynik zależy od zmieniającego się licznika.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <concepts>
+#include <cstddef>
 
-~~~text
-Temat: Concept normalization i subsumption
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+template<class T>
+concept HasSize = requires(const T& value) {
+    { value.size() } -> std::convertible_to<std::size_t>;
+};
+template<class T>
+concept NoThrowSize = HasSize<T> && requires(const T& value) {
+    { value.size() } noexcept;
+};
+template<HasSize T>
+constexpr int route(const T&) { return 1; }
+template<NoThrowSize T>
+constexpr int route(const T&) { return 2; }
+struct Fast { std::size_t size() const noexcept { return 4; } };
+struct Fallible { std::size_t size() const { return 4; } };
+int main() {
+    static_assert(route(Fast{}) == 2);
+    static_assert(route(Fallible{}) == 1);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`NoThrowSize` jawnie powtarza nazwę `HasSize`, a następnie dodaje osobne wymaganie braku wyjątków. Metody nie są wywoływane w `route`, więc ich brak `constexpr` nie przeszkadza w asercjach. Pierwszy typ wybiera ścieżkę o silniejszym kontrakcie, drugi pozostaje obsługiwany przez ścieżkę ogólną. Gdyby drugi concept napisać od zera jako podobną requires-expression, rozstrzygnięcie hierarchii nie musiałoby działać tak samo.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Concept normalization i subsumption”, oceniaj poprawność wobec abstract machine, przenośność, koszt dowodu, stabilność założenia i realny wpływ na wymaganie użytkownika. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Hierarchię concepts projektuj jako część publicznego interfejsu biblioteki. Mały zestaw ponownie używanych wymagań daje czytelniejsze przeciążenia niż wiele niezależnych predykatów o podobnym znaczeniu. Dla zachowania zależnego jedynie od wartości runtime zwykłe rozgałęzienie jest prostsze; constraints wybierają funkcje na podstawie typów i stałych dostępnych podczas kompilacji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy zapis `(A<T> && B<T>)` zawsze jest lepszym przeciążeniem niż niezależnie zdefiniowane `C<T>`, jeśli programista wie, że `C` oznacza `A`? **Odpowiedź:** nie; potrzebna jest odpowiednia tożsamość atomów po normalizacji. Czy zmiana `&&` na `&` zachowuje mechanizm constraints? Nie; bitowy operator tworzy inne wyrażenie, nie daje tego samego podziału normalizacji i short-circuit.
+
+Opis dotyczy C++23. **C++26** zmienia między innymi reguły fold-expanded constraints; nie przenoś nowszego rozstrzygnięcia przeciążeń na C++23 bez osobnego sprawdzenia. Źródło: [N4950: normalizacja i porządkowanie](https://timsong-cpp.github.io/cppwp/n4950/temp.constr).
+
+### Składnia sprawdzalna i prawa semantyczne
+
+Concept wymaga wyniku ograniczenia odpowiedniego typu logicznego; nie każda klasa posiadająca `operator bool` może zostać użyta jako atomic constraint w dowolnej postaci. Requires-expression sama produkuje wartość logiczną, co pomaga uporządkować takie sprawdzanie. Jej parametr lokalny, na przykład `T value`, opisuje hipotetyczny obiekt i nie oznacza, że podczas testowania conceptu zostanie wywołany konstruktor ani destructor.
+
+Compound requirement używa typu wyrażenia według odpowiednich reguł `decltype((expr))`. Wymaganie `same_as<int>` odrzuci zatem operację zwracającą `int&`, choć zwykłe przypisanie do `int` byłoby możliwe. `convertible_to<int>` ma inny kontrakt i może zaakceptować więcej wyników. Wybór pomiędzy tymi wymaganiami powinien odpowiadać temu, czy algorytm potrzebuje dokładnej referencji, wartości czy jedynie konwersji.
+
+Testuj hierarchię na typach granicznych: typ z metodą nieconst, typ zwracający referencję, typ z usuniętą operacją oraz typ rzucający. Takie przypadki pokazują, czy concept naprawdę wyraża zamierzoną granicę. Dla wymagań algebraicznych dodaj sprawdzanie praw na danych: syntaktyczna akceptacja komparatora nie wykazuje przechodniości ani spójności relacji równoważności.
+
+Zwróć uwagę na stabilność wyników sprawdzania ograniczeń. Dostępność składowej nie powinna zmieniać się wskutek badania tego samego ograniczenia raz przed ukończeniem typu, a raz po jego kompletnej definicji. Metaprogram opierający wybór na takim czasie może naruszyć reguły wymagające spójności spełnienia constraints. Zamiast sondować niegotową klasę, odłóż sprawdzenie do miejsca, w którym jej interfejs jest kompletny i wszystkie jednostki translacji widzą ten sam kontrakt.
 
 ## Powiązane tematy
 

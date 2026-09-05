@@ -33,47 +33,76 @@ Generatory wielokonfiguracyjne, np. Visual Studio i Xcode, wybierają konfigurac
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „CMake”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz odnalezienie deklaracji, przetworzenie zależności, utworzenie plików obiektowych, rozwiązanie symboli i złożenie końcowego artefaktu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel zależność źródłową, wymaganie użycia biblioteki, szczegół ABI oraz ustawienie prywatne konkretnego targetu. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź graf targetów, pełne komendy kompilacji, tablicę symboli, kolejność linkowania i zawartość pakietu. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Polecenie z `-S` i `-B` uruchamia konfigurację: CMake czyta projekt, identyfikuje kompilator, wykonuje testy konfiguracji i zapisuje cache w katalogu budowania. Następnie generuje reguły dla wybranego backendu, np. Ninja. `cmake --build` uruchamia właściwe narzędzie budujące, a nie ponownie ręcznie wybraną listę komend kompilatora. `ctest` wykonuje zarejestrowane testy; samo `add_test` nie tworzy programu testowego ani nie zastępuje `add_executable`.
 
-Model dla tej części kompendium jest następujący: Projekt C++ jest grafem jednostek translacji, modułów, bibliotek i artefaktów. Kompilator analizuje jednostki osobno, linker łączy definicje, a system budowania musi odtworzyć zależności i opcje w sposób powtarzalny. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W przykładzie `core` jest biblioteką, a `app` jej klientem. `target_link_libraries(app PRIVATE core)` opisuje zależność między targetami, więc CMake zna zarówno kolejność budowania, jak i wymagania przekazywane przez bibliotekę. Publiczny katalog nagłówków i minimalny standard C++23 stają się dostępne podczas kompilacji klienta. Nie trzeba ręcznie powtarzać tych parametrów dla każdego programu.
+
+`PRIVATE` oznacza wymaganie własnej kompilacji targetu, `INTERFACE` wymaganie jego użytkowników, a `PUBLIC` oba zakresy. Nie wybieraj zakresu według intuicji „ta biblioteka jest ważna”. Jeśli nagłówek publiczny zawiera typ obcej biblioteki, odbiorca zwykle potrzebuje odpowiednich wymagań interfejsu. Jeśli zależność występuje wyłącznie w `.cpp`, jej wymagania kompilacji nie powinny zanieczyszczać klienta.
 
 ## Pogłębienie mechanizmu
 
-- Nowoczesny CMake opisuje wymagania targetów przez właściwości `PRIVATE`, `PUBLIC` i `INTERFACE`. Globalne flagi i katalogowe include paths ukrywają zależności, utrudniając ponowne użycie oraz instalację pakietu.
+Biblioteka statyczna nie linkuje do środka automatycznie wszystkich swoich zależności. Jest archiwum własnych obiektów, a wymagane biblioteki muszą znaleźć się przy końcowym linkowaniu programu. CMake potrafi zachować także prywatne zależności linkowania statycznej biblioteki jako wymagania potrzebne końcowemu linkowi, bez propagowania wszystkich wymagań kompilacji. Dlatego prosty slogan „PRIVATE nigdy nie przechodzi dalej” byłby nieścisły.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „CMake” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+`target_compile_features(... cxx_std_23)` wyraża minimalny poziom standardu, nie obietnicę dostępności każdej funkcji biblioteki C++23. Kompilator i biblioteka standardowa są oddzielnymi składnikami. Jeśli wymagane są konkretne nagłówki lub makra cech, projekt powinien je sprawdzić albo dokumentować wspierane wersje. `CXX_EXTENSIONS OFF` pomaga wybrać tryb bez dodatkowych rozszerzeń języka, lecz nie zastępuje ostrzeżeń o nieprzenośnym kodzie.
+
+Cache zawiera ustawienia właściwe danemu build tree, między innymi wybór toolchainu. Zmienianie kompilatora w istniejącym katalogu może prowadzić do niespójnej konfiguracji; dla innego toolchainu używaj osobnego katalogu. Plik toolchain ustawia się przy pierwszej konfiguracji. Zwykłe flagi projektu przypisuj targetom, zamiast dopisywać je globalnie do `CMAKE_CXX_FLAGS`, co utrudnia kontrolę zakresu i integrację jako podprojekt.
+
+Generator expressions, np. `$<CONFIG:Debug>`, są oceniane w kontekście generowania i konfiguracji targetu. Nie są tym samym co zwykły `if`, wykonywany podczas konfiguracji. To istotne dla generatorów wielokonfiguracyjnych, gdzie jeden build tree zawiera jednocześnie Debug i Release. Presets zapisują powtarzalne konfiguracje; lokalne ścieżki użytkownika trzymaj poza współdzielonym plikiem projektu, w odpowiednich ustawieniach lokalnych.
+
+Opcja `BUILD_TESTING` w przykładzie steruje rejestracją testu, ale target `numbers_test` jest tworzony wcześniej bezwarunkowo. Jeśli wyłączenie testów ma również usuwać koszt ich kompilacji, przenieś `add_executable` i jego konfigurację do tego samego warunku. To pokazuje różnicę między grafem budowania a listą zadań CTest. Podobnie `ctest` sam nie przebudowuje nieaktualnego programu: w zwykłym przepływie najpierw wykonuje się build, a dopiero później testy gotowych artefaktów.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Biblioteka zawierająca wyłącznie nagłówki może być targetem INTERFACE. Ma własne wymagania użycia, choć nie powstaje dla niej archiwum z kodem.
 
 ~~~text
-Temat: CMake
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+# CMakeLists.txt
+cmake_minimum_required(VERSION 3.28)
+project(header_example LANGUAGES CXX)
+
+add_library(numbers INTERFACE)
+target_include_directories(numbers INTERFACE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>")
+target_compile_features(numbers INTERFACE cxx_std_23)
+
+add_executable(numbers_test tests/numbers_test.cpp)
+target_link_libraries(numbers_test PRIVATE numbers)
+set_target_properties(numbers_test PROPERTIES CXX_EXTENSIONS OFF)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME numbers_values COMMAND numbers_test)
+endif()
+
+# include/numbers.hpp
+#ifndef GUIDE_NUMBERS_HPP
+#define GUIDE_NUMBERS_HPP
+inline constexpr int answer() noexcept { return 42; }
+#endif
+
+# tests/numbers_test.cpp
+#include "numbers.hpp"
+int main() { return answer() == 42 ? 0 : 1; }
+
+# Generator jednokonfiguracyjny:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`BUILD_INTERFACE` wskazuje katalog źródeł podczas pracy w repozytorium, a `INSTALL_INTERFACE` opisuje względną ścieżkę docelowej instalacji. Przykład nie zawiera jeszcze reguł `install` ani eksportu pakietu; same wyrażenia nie instalują plików. Ich rozdzielenie zapobiega późniejszemu umieszczaniu absolutnej ścieżki komputera autora w interfejsie dostarczanym użytkownikowi.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „CMake”, oceniaj hermetyczność, szybkość przebudowy, przenośność konfiguracji, kontrola publicznych zależności i zgodność ABI. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Preferuj imported targets dostarczane przez `find_package` zamiast ręcznych ścieżek do archiwów. Lista źródeł zapisanych jawnie ułatwia przegląd zmian; automatyczne globowanie wymaga świadomej obsługi ponownej konfiguracji. Używaj małych targetów odpowiadających odpowiedzialnościom, lecz unikaj dzielenia bez potrzeby na setki bibliotek, które komplikują graf i końcowe linkowanie.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Publiczny nagłówek `core` używa `std::span`, ale standard ustawiono tylko prywatnie na bibliotece. Dlaczego klient może nie kompilować się poprawnie? **Odpowiedź:** wymaganie języka nie przechodzi do klienta. Jeżeli cecha należy do publicznego interfejsu, odpowiedni poziom standardu powinien należeć do PUBLIC lub INTERFACE. Flagi samej implementacji mogą pozostać PRIVATE.
 
-## Pułapki
-
-Nie używaj globalnego `include_directories` i `add_definitions`, jeśli właściwość należy do jednego targetu. Nie wstawiaj bezwarunkowo flag GCC do MSVC. Nie pobieraj zależności podczas każdego builda bez kontroli wersji i trybu offline. Minimalna wersja CMake powinna wynikać z używanych funkcji, nie z przypadkowej instalacji autora.
+Źródła: [CMake: model targetów](https://cmake.org/cmake/help/latest/manual/cmake-buildsystem.7.html), [compile features](https://cmake.org/cmake/help/latest/manual/cmake-compile-features.7.html), [presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html).
 
 ## Powiązane tematy
 
 - [Proces budowania](../01_wprowadzenie/05_proces_budowania.md)
 - [Conan, vcpkg i zależności](06_conan_vcpkg_i_zaleznosci.md)
 - [Moduły C++](04_moduly_cpp.md)
-

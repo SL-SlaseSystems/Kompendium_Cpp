@@ -36,43 +36,67 @@ Szablon nie jest zwykłą funkcją ani klasą, dopóki nie powstanie specjalizac
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Szablony funkcji i klas”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zebranie argumentów, dedukcję parametrów, sprawdzenie ograniczeń, wybór specjalizacji i instancjację użytej postaci. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd substytucji, niespełnione constraint i błąd wewnątrz już wybranej instancji. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wydedukowane typy, zbiór kandydatów, spełnione constraints oraz minimalną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+W `maximum(3, 7)` kompilator porównuje oba argumenty z parametrami typu `T` i dedukuje `T = int`. Następnie sprawdza, czy powstała funkcja może uczestniczyć w wywołaniu. Gdy potrzebna jest jej definicja, instancjonuje ciało dla tego typu. Porównanie i konstrukcja wyniku muszą być wtedy poprawne. Szablon nie gwarantuje, że każde podstawienie z dowolnym typem ma sens.
 
-Model dla tej części kompendium jest następujący: Szablon jest przepisem na deklaracje zależne od argumentów, a nie kodem wykonywanym w runtime. Dedukcja, lookup, ograniczenia i instancjacja zachodzą w różnych momentach; pomieszanie tych faz prowadzi do trudnych diagnostyk. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Wywołanie `maximum(3, 7.0)` nie wybiera automatycznie jednego szerszego typu. Pierwszy argument sugeruje `int`, a drugi `double`, więc dedukcja wspólnego `T` nie jest spójna. Jawne `maximum<double>(3, 7.0)` najpierw ustala typ i dopiero pozwala konwertować argumenty. Alternatywny szablon z niezależnymi `T` i `U` wymaga świadomego zaprojektowania wspólnego typu wyniku.
+
+`FixedBuffer<int, 4>` tworzy specjalizację klasy z typem elementu i stałą długością. `FixedBuffer<int, 8>` jest innym typem, nawet jeśli ma takie same nazwy metod. Wartość `N` staje się częścią tożsamości typu. Pętla działająca na takiej klasie może znać długość podczas kompilacji, lecz sam parametr szablonu nie wymusza konkretnej optymalizacji.
 
 ## Pogłębienie mechanizmu
 
-- Szablon funkcji zwykle dedukuje argumenty z wywołania, a szablon klasy przed C++17 wymagał jawnych argumentów lub fabryki. Każda użyta instancja jest odrębnym bytem, co wpływa na czas kompilacji i rozmiar kodu.
+Nazwy niezależne od parametrów są zwykle wyszukiwane przy definicji szablonu. Nazwy zależne wymagają uwzględnienia argumentów podczas instancjacji. Brak deklaracji zwykłej pomocniczej funkcji przy definicji nie jest zawsze naprawiany przez dopisanie jej później. Ten podział, często omawiany jako two-phase lookup, pozwala ograniczyć zależność znaczenia szablonu od przypadkowej kolejności dołączania nagłówków.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Szablony funkcji i klas” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Zależną nazwę typu może być trzeba poprzedzić `typename`, na przykład `typename T::value_type`. Przy zależnym wywołaniu szablonu składowego może być potrzebne słowo `template`. Te słowa pomagają parserowi rozpoznać składnię, zanim pozna konkretny `T`; nie tworzą nowego typu ani nowego szablonu. W klasie dziedziczącej z bazy zależnej często potrzebne jest `this->member`, aby wyszukiwanie właściwie uwzględniało tę bazę.
+
+Instancjacja specjalizacji klasy nie musi instancjonować definicji wszystkich jej metod. Zwykle ciało metody jest potrzebne dopiero, gdy użycie go wymaga. Dlatego szablon klasy może mieć operację sensowną tylko dla części typów, choć jawne constraints dają czytelniejszy interfejs niż późny błąd z wnętrza metody. Wirtualne funkcje i wybrane szczególne sytuacje mają dodatkowe reguły instancjacji.
+
+Parametry wartościowe mogą obejmować liczby, wskaźniki i określone typy strukturalne. Nie oznacza to, że dowolny obiekt `std::string` nadaje się jako argument szablonu. Argument musi spełniać reguły typu parametru i stałego wyrażenia. `template<auto Value>` dedukuje typ argumentu, dzięki czemu wartości takie jak `3` i `3u` mogą tworzyć różne specjalizacje.
+
+Zwykle definicja szablonu jest udostępniona wraz z deklaracją w nagłówku. Przy zamkniętym zbiorze obsługiwanych typów można użyć jawnych instancjacji w pliku implementacji oraz deklaracji `extern template` ograniczających powtarzaną pracę. To decyzja o architekturze biblioteki: nowy nieprzewidziany typ może wtedy wymagać nowej dostarczonej instancjacji.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Dwa bufory o różnej długości są różnymi typami. `std::array` obsługuje także rozmiar zero, czego wbudowana tablica `T[N]` z pierwszego przykładu nie zapewnia w standardowym C++.
 
-~~~text
-Temat: Szablony funkcji i klas
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <type_traits>
+
+template<class T, std::size_t N>
+struct Buffer {
+    std::array<T, N> values{};
+    constexpr std::size_t size() const noexcept { return N; }
+};
+
+template<class T, std::size_t N>
+T total(const Buffer<T, N>& buffer) {
+    T result{};
+    for (const auto& value : buffer.values) result += value;
+    return result;
+}
+
+int main() {
+    Buffer<int, 3> numbers{{2, 3, 4}};
+    Buffer<int, 0> empty;
+    static_assert(!std::is_same_v<decltype(numbers), decltype(empty)>);
+    assert(total(numbers) == 9);
+    assert(total(empty) == 0);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`total` dedukuje jednocześnie typ elementu i długość. Wymaga wartości początkowej `T{}` oraz odpowiedniego `+=`. Dla liczb oznacza to sumowanie, lecz dla własnego typu neutralność wartości domyślnej jest już wymaganiem semantycznym, którego sama poprawna składnia nie dowodzi.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Szablony funkcji i klas”, oceniaj czytelny kontrakt, krótka diagnostyka, ograniczona liczba instancji i brak metaprogramowania bez wartości dla użytkownika API. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Szablon pasuje do algorytmu o wspólnej strukturze i zachowaniu zależnym od typu. Zwykła przeciążona funkcja jest prostsza, gdy obsługujesz kilka z góry znanych przypadków o odmiennych kontraktach. Wartość runtime pasuje do liczby zmieniającej się podczas pracy; parametr szablonu do informacji, która naprawdę ma definiować typ lub dostępność operacji.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy wywołanie `maximum<int>(2.9, 3.1)` porównuje pierwotne wartości zmiennoprzecinkowe?
 
-## Dobre praktyki
+**Odpowiedź.** Nie. Jawny argument ustala parametry funkcji jako `int`, więc argumenty są konwertowane przed wejściem do ciała. Porównywane są dwa i trzy. To pokazuje różnicę między dedukowaniem typu a świadomym wymuszeniem konwersji.
 
-Parametryzuj tylko wymaganą zmienność. Projektuj operacje na podstawie potrzebnego zachowania, nie przypadkowego dziedziczenia. Nie używaj `std::move` na argumentach referencyjnych bez jasnego kontraktu własności; prosty `maximum` powyżej przyjmuje wartości właśnie po to, by móc je przenieść do wyniku.
+Źródła: [parametry szablonów](https://timsong-cpp.github.io/cppwp/n4950/temp.param), [instancjacja](https://timsong-cpp.github.io/cppwp/n4950/temp.inst), [dedukcja argumentów wywołania](https://timsong-cpp.github.io/cppwp/n4950/temp.deduct.call).
 
 ## Powiązane tematy
 

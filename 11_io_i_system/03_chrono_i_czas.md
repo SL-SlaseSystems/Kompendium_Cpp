@@ -30,39 +30,51 @@ Timeouty powinny używać deadline opartego o steady clock, aby spurious wakeup 
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „chrono i czas”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz normalizację wejścia, wykonanie operacji systemowej lub bibliotecznej, sprawdzenie wyniku i zamknięcie zasobu. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel format danych od obiektu domenowego, czas monotoniczny od kalendarzowego oraz API standardowe od zależności platformowej. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź kod błędu, liczbę przetworzonych bajtów, stan strumienia, jednostkę pomiaru i wynik dla przerwanej operacji. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Zacznij od określenia, co reprezentuje wartość: długość odcinka czy pozycję na osi konkretnego zegara. `500ms` to odcinek. `steady_clock::now()` to punkt czasu. Różnica dwóch punktów tego samego zegara daje odcinek, a dodanie odcinka do punktu daje nowy punkt. Taki model zapobiega przypadkowemu dodawaniu dwóch dat lub porównywaniu niepowiązanych zegarów.
 
-Model dla tej części kompendium jest następujący: I/O przekracza granicę procesu i dlatego jest częściowe, opóźnione oraz zależne od reprezentacji. Każda operacja potrzebuje modelu błędów, limitu danych, kodowania lub jednostki oraz zasad własności uchwytu. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+Przy timeout najpierw wyznacz `deadline = steady_clock::now() + timeout`. W pętli oczekiwania wracaj do tego samego deadline. Gdy za każdym przebudzeniem rozpoczynasz od nowa pełne `wait_for(timeout)`, kolejne pobudki mogą wielokrotnie odsunąć zakończenie. Samo osiągnięcie deadline nie gwarantuje dokładnego momentu wznowienia wątku: do wykonania potrzebny jest jeszcze czas procesora.
 
 ## Pogłębienie mechanizmu
 
-- `steady_clock` nadaje się do mierzenia odstępów, ponieważ nie cofa się wraz z korektą zegara kalendarzowego. Typowane duration chronią jednostki, ale jawne cast jest potrzebne, gdy konwersja może utracić precyzję.
+Typ `duration<Rep, Period>` przechowuje liczbę taktów w `Rep`; `Period` określa długość taktu jako ułamek sekundy. `count()` zwraca samą liczbę i traci informację o jednostce w typie wyniku. Nie przekazuj jej dalej jako niezinterpretowanego `int`, jeżeli odbiorca może przyjąć bezpośrednio `milliseconds` lub inny typ czasu.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „chrono i czas” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Konwersja na jednostkę grubszą może tracić dokładność. Dla reprezentacji całkowitych `duration_cast` obcina w kierunku zera. To szczególnie ważne dla ujemnych odcinków: obcięcie nie jest zaokrągleniem w dół. `floor`, `ceil` i `round` pozwalają wyrazić konkretną politykę. Oprócz precyzji kontroluj zakres reprezentacji, ponieważ przeliczenie ogromnej wartości na nanosekundy może się nie mieścić.
+
+Kalendarz i arytmetyka czasu trwania rozwiązują różne problemy. `days{1}` opisuje odcinek 24 godzin, ale przejście do następnego dnia kalendarzowego w lokalnej strefie może obejmować inny czas rzeczywisty przy zmianie DST. „Spotkanie jutro o 9:00” wymaga daty, lokalnej godziny i strefy; „spróbuj ponownie za 30 sekund” wymaga odcinka i zegara monotonicznego.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+~~~cpp
+#include <chrono>
 
-~~~text
-Temat: chrono i czas
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+using namespace std::chrono_literals;
+
+int main() {
+    constexpr auto delta = -1500ms;
+    static_assert(std::chrono::duration_cast<std::chrono::seconds>(delta) == -1s);
+    static_assert(std::chrono::floor<std::chrono::seconds>(delta) == -2s);
+    static_assert(std::chrono::ceil<std::chrono::seconds>(delta) == -1s);
+    constexpr auto sum = 2s + 250ms;
+    static_assert(sum == 2250ms);
+    constexpr std::chrono::year_month_day leap_day{
+        std::chrono::year{2024}, std::chrono::month{2}, std::chrono::day{29}};
+    static_assert(leap_day.ok());
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Wyniki są sprawdzane podczas kompilacji i nie zależą od szybkości komputera. `year_month_day` może reprezentować niepoprawną datę, dlatego samo skonstruowanie pól nie zastępuje `ok()`. To analogiczne do parsera, który odczytał trzy liczby, ale jeszcze nie ustalił, czy tworzą datę kalendarzową.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „chrono i czas”, oceniaj jawne kodowanie, kontrolowane limity, odporność na częściowy odczyt, bezpieczne ścieżki i deterministyczne sprzątanie. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Do pomiaru czasu działania i limitów używaj `steady_clock`. Do zapisywania znaczników zdarzeń, które mają znaczenie poza jednym procesem, używaj odpowiednio określonej skali czasu, często opartej na `system_clock`, i dokumentuj format. Nie serializuj surowych bajtów `time_point`: wybierz jednostkę, epokę, szerokość reprezentacji oraz zasady dotyczące sekund przestępnych.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Do testów logiki terminów wstrzykuj źródło czasu lub przekazuj `now` jako argument. Test, który usypia wątek na sekundę i liczy na idealny harmonogram, jest wolny i podatny na obciążenie maszyny. Kontrolowany zegar pozwala sprawdzić moment tuż przed granicą, dokładnie na niej i po niej bez oczekiwania.
+
+## Ćwiczenie z odpowiedzią
+
+Czy `duration_cast<seconds>(-1500ms)` daje `-2s`? Nie, daje `-1s`. Jeśli dzielisz oś czasu na przedziały i potrzebujesz dolnej granicy, wybierz `floor`. Następnie wyjaśnij, dlaczego dodanie `24h` do punktu czasu nie jest zawsze tym samym co wybór tej samej lokalnej godziny następnego dnia: przepisy strefowe zmieniają odwzorowanie lokalnego kalendarza na oś czasu.
+
+Źródła: [C++23, duration_cast](https://timsong-cpp.github.io/cppwp/n4950/time.duration.cast), [biblioteka chrono](https://timsong-cpp.github.io/cppwp/n4950/time).
 
 ## Powiązane tematy
 

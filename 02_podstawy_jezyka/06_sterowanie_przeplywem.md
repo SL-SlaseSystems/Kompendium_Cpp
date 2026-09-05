@@ -35,43 +35,63 @@ Range-based `for` pobiera element zgodnie z deklaracją zmiennej pętli. `auto e
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „Sterowanie przepływem”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz utworzenie deklaracji, ustalenie typu, wybór operacji i ocenę wyrażenia zgodnie z regułami języka. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba sprawdź, które informacje istnieją w czasie kompilacji, a które zależą od danych i stanu programu podczas wykonania. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź typ wyrażenia, wybrany overload, zakres nazwy, wartość wyniku i ewentualną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Zwykły `for` wykonuje inicjalizator raz, potem sprawdza warunek, wykonuje ciało i oblicza wyrażenie iteracyjne. Po `continue` nadal wykonuje wyrażenie iteracyjne, zanim znów sprawdzi warunek. W `while` instrukcja `continue` przechodzi bezpośrednio do warunku. Dlatego mechaniczne przepisanie pętli między tymi postaciami może pominąć zwiększenie indeksu i stworzyć nieskończoną pętlę.
 
-Model dla tej części kompendium jest następujący: Podstawowe konstrukcje C++ trzeba czytać jako operacje na typach, wartościach i zakresach, a nie tylko jako składnię. Istotne są konwersje, kategorie wartości, kolejność ewaluacji oraz to, czy dana nazwa oznacza obiekt, funkcję czy typ. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W początkowym przykładzie każda ujemna liczba omija dodawanie. Zero jest dodawane, lecz nie zmienia wyniku; nazwa `sum_positive` jest więc zgodna z wynikiem, choć warunek przepuszcza też zero. Suma typu `int` ma wymaganie, aby kolejne wyniki mieściły się w zakresie. Poprawna składnia pętli nie gwarantuje poprawności arytmetyki dla dowolnie dużego wejścia.
+
+Range-based `for` tworzy wewnętrznie dostęp do zakresu oraz jego początku i końca. Przy każdej iteracji dereferencjonuje bieżący iterator i inicjalizuje deklarowaną zmienną elementu. `auto` może więc kopiować, a referencja pozwala operować na samym elemencie. Początek i koniec są uzyskiwane przed iteracjami; modyfikowanie kontenera tak, że unieważnia iteratory lub zapamiętany koniec, może zepsuć pętlę nawet wtedy, gdy aktualny element nadal istnieje.
 
 ## Pogłębienie mechanizmu
 
-- Inicjalizator w `if` lub `switch` ogranicza lifetime pomocniczej wartości do instrukcji sterującej. Wczesne wyjście upraszcza happy path, ale sprzątanie powinno pozostać odpowiedzialnością RAII zamiast ręcznych gałęzi.
+`break` kończy najbliższą otaczającą pętlę albo `switch`, lecz nie wszystkie zagnieżdżone konstrukcje. `continue` dotyczy najbliższej pętli, nawet jeśli zapisano je wewnątrz `switch`. W złożonym wyszukiwaniu pomocna bywa osobna funkcja i `return`, które jasno kończy całe zadanie. W każdym zwykłym wyjściu z zakresu lokalne obiekty są niszczone, również po `break`, `continue` i `return`.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „Sterowanie przepływem” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Etykiety `case` same nie tworzą zakresów. Przejście bezpośrednio do etykiety nie może pomijać niedozwolonej inicjalizacji lokalnego obiektu. Jeżeli gałąź potrzebuje zmiennej, obejmij jej ciało klamrami. `[[fallthrough]];` sygnalizuje zamierzone przejście do następnej etykiety; nie wykonuje skoku ani nie zastępuje `break`.
+
+`if constexpr` od C++17 jest mechanizmem wyboru podczas instancjacji szablonu. Zwykły `if`, nawet z warunkiem `false`, nadal wymaga poprawności obu gałęzi. W `if constexpr` niewybrana zależna gałąź szablonu nie jest instancjonowana, lecz nie można umieszczać tam dowolnie błędnej składni. Poza szablonem także nie jest to ogólny sposób ukrywania błędnego programu.
+
+C++23 rozszerza przedłużanie życia obiektów tymczasowych w inicjalizatorze pętli zakresowej. Nadal nie naprawia funkcji, która sama zwraca referencję do już zniszczonego parametru lub lokalnego obiektu. Jawny inicjalizator pętli, dostępny od C++20, jest dobrym sposobem przechowania właściciela danych: `for (auto owner = make(); const auto& x : owner.items())`. W ten sposób zależność życia jest widoczna również dla czytelnika.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Usuwanie podczas iteracji powinno korzystać z iteratora zwracanego przez `erase`. Po usunięciu nie zwiększamy starego iteratora, ponieważ dla wektora przestał być ważny.
 
-~~~text
-Temat: Sterowanie przepływem
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <cassert>
+#include <vector>
+
+int main() {
+    std::vector values{1, -2, 3, -4, 5};
+    for (auto it = values.begin(); it != values.end();) {
+        if (*it < 0) {
+            it = values.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    assert((values == std::vector{1, 3, 5}));
+
+    int total = 0;
+    for (int& value : values) {
+        value *= 2;
+        total += value;
+    }
+    assert(total == 18);
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+Pierwsza pętla świadomie ponownie pobiera `end()` w warunku. Zwykły zakresowy `for` nie zastępuje jej poprawnie, ponieważ usuwanie unieważnia iteratory. Dla samego filtrowania od C++20 prostsze jest `std::erase_if`; ręczny zapis służy tu prześledzeniu reguł i jest przydatny, gdy z usuwaniem łączą się dodatkowe operacje.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „Sterowanie przepływem”, oceniaj jawność intencji, brak niebezpiecznych konwersji, minimalny zakres nazw i możliwość wykrycia błędu podczas kompilacji. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Warunek pętli powinien odpowiadać temu, co faktycznie gwarantuje jej ciało. Przy indeksie bez znaku zapis `i >= 0` jest zawsze prawdziwy i nie nadaje się do zakończenia odliczania w dół. Bezpieczny schemat może zaczynać od rozmiaru i sprawdzać `i > 0`, a używać elementu `i - 1`. Trzeba rozpatrzyć także pusty zakres, zanim wykona się pierwsze odejmowanie.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+Wybieraj zakresowy `for`, gdy odwiedzasz elementy bez strukturalnej zmiany kontenera. Użyj indeksu, kiedy pozycja jest częścią obliczenia, a iteratora, gdy operacja zwraca nowe miejsce kontynuacji. Algorytm standardowy jest wygodniejszy, gdy zadanie ma wyraźną nazwę, taką jak wyszukanie, zliczenie lub filtrowanie.
 
-## Dobre praktyki
+**Ćwiczenie.** Pętla ma postać `while (i < n) { if (skip(i)) continue; ++i; }`. Dlaczego może się nie skończyć?
 
-Preferuj range-based `for` i algorytmy, gdy indeks nie jest potrzebny. Utrzymuj warunki bez efektów ubocznych. Wyczerpująco obsługuj `enum class` i pozwól ostrzeżeniom wykrywać brak nowych wariantów; pochopne `default` może takie ostrzeżenie ukryć.
+**Odpowiedź.** Dla wartości, dla której `skip(i)` zwraca prawdę, `continue` omija zwiększenie `i`. Kolejne sprawdzenie widzi ten sam indeks. Przeniesienie zwiększania do części iteracyjnej `for` zapewnia wykonanie także po `continue`, jeśli taki przebieg odpowiada kontraktowi.
+
+Źródła: [instrukcje iteracyjne](https://timsong-cpp.github.io/cppwp/n4950/stmt.iter), [pętla zakresowa](https://timsong-cpp.github.io/cppwp/n4950/stmt.ranged), [instrukcje wyboru](https://timsong-cpp.github.io/cppwp/n4950/stmt.select).
 
 ## Powiązane tematy
 

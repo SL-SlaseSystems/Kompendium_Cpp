@@ -42,39 +42,68 @@ Compile time nie jest darmowy. Nadmierna liczba instancjacji zwiększa czas budo
 
 ## Jak to działa krok po kroku
 
-1. **Zapisz kontrakt.** Określ, jakie wartości i typy wchodzą do mechanizmu „constexpr, consteval i metaprogramowanie”, jaki stan jest poprawny oraz co wywołujący może obserwować po sukcesie i porażce.
-2. **Prześledź fazę języka.** Rozpisz zebranie argumentów, dedukcję parametrów, sprawdzenie ograniczeń, wybór specjalizacji i instancjację użytej postaci. Pozwala to wskazać, czy decyzja zapada w preprocessing, podczas kompilacji, linkowania czy dopiero w runtime.
-3. **Ustal granice odpowiedzialności.** Dla tego zagadnienia trzeba oddziel błąd substytucji, niespełnione constraint i błąd wewnątrz już wybranej instancji. Szczególnie ważne są ownership, lifetime i miejsce, w którym obowiązuje inwariant.
-4. **Zbierz dowód.** Sprawdź wydedukowane typy, zbiór kandydatów, spełnione constraints oraz minimalną diagnostykę kompilatora. Jeden poprawny output nie wystarcza, jeśli program mógł wcześniej wykonać undefined behavior albo zależy od niejawnej konfiguracji.
+Wywołanie funkcji `constexpr` ma dwa możliwe konteksty. Jeżeli wynik służy jako inicjalizator zmiennej `constexpr`, warunek `static_assert` lub odpowiedni argument szablonu, obliczenie musi spełnić reguły stałego wyrażenia. Przy zwykłym wywołaniu z danymi runtime ta sama funkcja działa podczas wykonania, chyba że optymalizator zgodnie z regułą as-if uprości wynik.
 
-Model dla tej części kompendium jest następujący: Szablon jest przepisem na deklaracje zależne od argumentów, a nie kodem wykonywanym w runtime. Dedukcja, lookup, ograniczenia i instancjacja zachodzą w różnych momentach; pomieszanie tych faz prowadzi do trudnych diagnostyk. W praktyce warto narysować małą oś czasu obiektu lub artefaktu: utworzenie, wszystkie miejsca przekazania, moment ostatniego legalnego użycia i zakończenie. Taki zapis często ujawnia błąd wcześniej niż analiza samej składni.
+W `squares<4>()` parametr szablonu określa długość zwracanego `std::array`. Funkcja tworzy lokalną tablicę, wykonuje pętlę i zapisuje wyniki do jej elementów. Takie zmienne i pętle są dozwolone w nowoczesnych funkcjach `constexpr`; nie trzeba reprezentować każdego kroku kolejną instancją rekurencyjnego szablonu. `static_assert` sprawdza potem konkretny element jako część warunku kompilacji.
+
+`consteval` opisuje funkcję natychmiastową. Wywołanie w kontekście wymagającym immediate invocation musi być stałym wyrażeniem; zwykłe dane od użytkownika nie mogą po prostu stać się jej argumentami. Istnieją specjalne konteksty wewnątrz innych funkcji natychmiastowych i gałęzi `if consteval`, dlatego reguła jest precyzyjniejsza niż „każdy zapis wywołania musi zawierać same literały”.
 
 ## Pogłębienie mechanizmu
 
-- `consteval` wymaga constant evaluation każdego potencjalnie ocenianego wywołania, natomiast funkcja `constexpr` może działać zarówno podczas kompilacji, jak i runtime. Constant evaluation nadal przestrzega reguł języka i diagnozuje niedozwolone operacje.
+Stałe obliczenie nie może na ocenianej ścieżce wykonywać operacji wykluczonych przez reguły, takich jak odpowiednie UB lub wywołanie nieprzystosowanej funkcji runtime. Dzielenie przez zero albo signed overflow w wymaganym stałym wyrażeniu prowadzi do błędu kompilacji. Przepełnienie unsigned nadal jest zdefiniowaną arytmetyką modulo i nie staje się automatycznie błędem tylko dlatego, że obliczenie zachodzi wcześniej.
 
-Pojęcia wymienione wyżej współdziałają, lecz nie powinny być zlewane w jedną regułę. Dla „constexpr, consteval i metaprogramowanie” osobno sprawdź poprawność programu wobec standardu, wymagania używanego API oraz koszt konkretnej implementacji. Dzięki temu optymalizacja nie ukryje naruszenia kontraktu, a szczegół jednego kompilatora nie zostanie przedstawiony jako przenośna gwarancja C++.
+Pierwszy `factorial` używa unsigned, więc dla zbyt dużej wartości daje wynik modulo, który nie jest matematyczną silnią. Pętla ma też warunek wymagający ostrożności przy maksymalnej wartości argumentu. Przykład ilustruje mechanizm na małych liczbach, nie stanowi walidowanego API dowolnej silni. Obliczenia compile-time potrzebują tych samych przemyślanych granic co runtime.
+
+`if constexpr` wybiera gałąź na podstawie warunku stałego. W szablonie niewybrana gałąź zależna nie jest instancjonowana, dzięki czemu jedna funkcja może obsługiwać różne operacje typów. Nadal obowiązuje poprawna składnia i analiza niezależnych konstrukcji. Zwykłe `if` nie ma takiej własności. Z kolei `if consteval`, dodane w C++23, rozróżnia kontekst ewaluacji, nie typ argumentu.
+
+`std::is_constant_evaluated()` od C++20 pozwala pytać o stałą ewaluację. Umieszczenie go bezrefleksyjnie jako warunku `if constexpr` nie sprawdza runtime'owej sytuacji danego wywołania, ponieważ sam warunek `if constexpr` wymaga stałej ewaluacji. Zwykły `if` lub `if consteval` lepiej wyraża odpowiedni podział. Alternatywne ścieżki powinny utrzymywać sensowny wspólny kontrakt wyników.
+
+Od C++20 pewne dynamiczne alokacje mogą występować podczas stałej ewaluacji, ale muszą być odpowiednio rozliczone w jej obrębie. Lokalny `vector` może służyć jako przestrzeń robocza, jeśli implementacja biblioteki obsługuje wymagane operacje constexpr. Nie wynika z tego ogólna możliwość umieszczenia dowolnego bufora dynamicznego w trwałej wartości `constexpr` zwracanej poza ewaluację.
+
+Type traits, takie jak `remove_cvref_t`, obliczają typy. Funkcje `constexpr` obliczają wartości. Łączenie obu narzędzi jest naturalne, lecz nie wymaga budowania rekurencyjnych klas dla prostego sumowania. Koszt wielu specjalizacji i dużych tabel stałych może obciążać kompilator oraz zwiększać binarium, więc przeniesienie pracy do kompilacji powinno odpowiadać konkretnemu wymaganiu.
 
 ## Drugi przykład
 
-Poniższy scenariusz jest przykładem diagnostycznym. Uzupełnia kompilowalny kod z początku rozdziału o przypadek graniczny i sposób weryfikacji założenia.
+Walidowana funkcja wyznacza rozmiar tablicy. Jej błędne wywołanie podczas wymaganej ewaluacji nie może przejść do wykonania programu, ponieważ oceniana ścieżka rzuca wyjątek.
 
-~~~text
-Temat: constexpr, consteval i metaprogramowanie
-Przypadek podstawowy: minimalne poprawne dane i jeden właściciel zasobu
-Zmiana kontrolna: pusty zakres, przeniesiony obiekt, wyjątek albo konkurencyjny dostęp
-Pytanie: który kontrakt przestaje obowiązywać i w którym momencie?
-Dowód: diagnostyka kompilatora + sanitizer/test + stan przed i po operacji
-Decyzja: wybór prostszego wariantu, który jawnie koduje ownership i lifetime
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <stdexcept>
+
+consteval std::size_t bounded_size(int requested) {
+    if (requested < 1 || requested > 64) {
+        throw std::invalid_argument{"size outside [1, 64]"};
+    }
+    return static_cast<std::size_t>(requested);
+}
+
+constexpr int magnitude(int value) {
+    return value < 0 ? -value : value;
+}
+
+int main() {
+    std::array<int, bounded_size(8)> buffer{};
+    static_assert(magnitude(-7) == 7);
+    int input = -5;
+    assert(magnitude(input) == 5);
+    assert(buffer.size() == 8);
+    // std::array<int, bounded_size(0)> invalid; // celowy błąd kompilacji
+}
 ~~~
 
-Najpierw uruchom przypadek podstawowy, potem zmień dokładnie jeden warunek. Jeśli problem dotyczy typów, zachowaj te same dane; jeśli lifetime, zachowaj typy i przesuń moment zniszczenia. Przy współbieżności dodaj prawdziwą synchronizację zamiast opóźnień czasowych. Taki eksperyment rozdziela przyczynę od przypadkowej zmiany layoutu, optymalizacji lub harmonogramu.
+`throw` jest legalnie zapisany w funkcji, ale jego wykonanie na ścieżce wymaganej stałej ewaluacji odrzuca ten inicjalizator. Funkcja `magnitude` ma osobny warunek dziedzinowy: nie należy przekazywać najmniejszego `int`, którego dodatnia wartość nie mieści się w tym typie. Samo `constexpr` nie dodaje kontroli tego zakresu.
 
 ## Porównanie i decyzje
 
-Wybierając rozwiązanie dla „constexpr, consteval i metaprogramowanie”, oceniaj czytelny kontrakt, krótka diagnostyka, ograniczona liczba instancji i brak metaprogramowania bez wartości dla użytkownika API. Wariant bardziej ogólny nie jest automatycznie lepszy: szablon może wydłużyć kompilację, polimorfizm dynamiczny może utrudnić value semantics, a współdzielona własność może ukryć cykl. Preferuj najmniejszy interfejs, który wyraża wymagany kontrakt i uniemożliwia typowe błędne stany.
+Wybieraj `constexpr` dla wspólnego algorytmu stałego i dynamicznego, `consteval` dla operacji mającej odrzucać niewłaściwą konfigurację przy kompilacji, a concepts dla dostępności interfejsu zależnej od typów. `constinit` służy innemu celowi: wymusza odpowiednią statyczną inicjalizację obiektu, który może później zmieniać wartość.
 
-Przed zatwierdzeniem API odpowiedz: kto posiada zasób, jak długo obowiązuje każdy widok, co dzieje się przy częściowym niepowodzeniu i czy zachowanie zależy od ABI lub wersji standardu? Następnie sprawdź wariant prostszy — wartość zamiast wskaźnika, RAII zamiast ręcznego cleanup, algorytm standardowy zamiast pętli albo mutex zamiast lock-free. Bardziej złożony mechanizm jest uzasadniony dopiero wtedy, gdy wymaganie lub pomiar odrzuca prostsze rozwiązanie.
+**Ćwiczenie.** Czy `constexpr unsigned result = maximum_unsigned + 1u;` musi wywołać błąd, jeśli `maximum_unsigned` jest maksymalnym unsigned?
+
+**Odpowiedź.** Nie. Arytmetyka unsigned jest zdefiniowana modulo i wynikiem jest zero. Jeżeli zero oznacza błąd domeny, trzeba wprowadzić osobne sprawdzenie. Obliczenie podczas kompilacji gwarantuje zgodność z regułami języka, nie z niewyrażoną intencją matematyczną.
+
+Źródła: [stałe wyrażenia](https://timsong-cpp.github.io/cppwp/n4950/expr.const), [constexpr i consteval](https://timsong-cpp.github.io/cppwp/n4950/dcl.constexpr), [if constexpr i if consteval](https://timsong-cpp.github.io/cppwp/n4950/stmt.if).
 
 ## Powiązane tematy
 
