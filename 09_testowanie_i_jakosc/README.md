@@ -45,3 +45,9 @@ Potrafisz odtworzyć błąd testem, zobaczyć RED, naprawić go do GREEN, a nast
 ## Co dalej
 
 Przejdź do [współbieżności](../10_wspolbieznosc/README.md), gdzie testowanie musi uwzględnić nondeterminizm i model pamięci.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/09_testowanie_i_jakosc.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

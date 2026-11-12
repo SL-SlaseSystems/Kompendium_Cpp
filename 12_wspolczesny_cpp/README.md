@@ -45,3 +45,9 @@ Potrafisz wskazać minimalny standard dla używanego mechanizmu, sprawdzić dost
 ## Co dalej
 
 Przejdź do [wzorców, API i wydajności](../13_wzorce_api_i_wydajnosc/README.md), aby użyć współczesnych mechanizmów w stabilnym projekcie.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/12_wspolczesny_cpp.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

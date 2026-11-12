@@ -2,7 +2,7 @@
 
 # C++26 i nadchodzące funkcje
 
-**Status zweryfikowany 2026-09-05:** prace WG21 nad zestawem funkcji C++26 są ukończone; szczegóły i źródło podano poniżej. Bazowy tekst kompendium i testy dotyczą C++23. Funkcje C++26 wymagają osobnej kontroli frontendu, biblioteki standardowej oraz konfiguracji platformy.
+**Status publikacji sprawdzony 2026-11-12:** [katalog ISO](https://www.iso.org/standard/83626.html) nadal oznacza ISO/IEC 14882:2024 jako opublikowaną normę, a następną rewizję jako draft. Ukończenie etapu prac WG21 nie jest tym samym co publikacja ISO. Bazowy tekst kompendium i testy dotyczą C++23. Funkcje C++26 wymagają osobnej kontroli frontendu, biblioteki standardowej oraz konfiguracji platformy; ten rozdział nie jest deklaracją pełnego wsparcia w lokalnym toolchainie.
 
 Do głównych mechanizmów C++26 należą statyczna refleksja oparta o `std::meta::info`, contracts, pack indexing i dalsze rozszerzenia constant evaluation. Draft rozróżnia także erroneous behavior w części sytuacji wcześniej opisywanych przez wartości indeterminate. Biblioteka rozwija execution, narzędzia współbieżne, kontenery oraz interfejsy numeryczne, w tym standardowe SIMD.
 
@@ -48,7 +48,7 @@ Przy pack indexing `Types...[I]` wybiera typ o ustalonym indeksie w parameter pa
 
 ## Pogłębienie mechanizmu
 
-**Stan sprawdzony 2026-09-05:** prace komitetu nad C++26 zakończono na spotkaniu WG21 w Croydon w marcu 2026, co potwierdza [P3850R0](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2026/p3850r0.pdf). Ukończenie prac WG21, formalna publikacja ISO i dostępność konkretnej implementacji są odrębnymi zdarzeniami. Ten rozdział nie zakłada pełnego wsparcia w toolchainach ani nie nadaje przyszłym propozycjom C++29 statusu części C++26.
+**Rozdzielenie etapów, sprawdzone 2026-11-12:** [P3850R0](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2026/p3850r0.pdf) opisuje zakończenie prac WG21 nad C++26 na spotkaniu w Croydon w marcu 2026. Nie zastępuje to informacji ISO o formalnej publikacji. Dostępność konkretnej implementacji jest jeszcze osobnym zdarzeniem. Ten rozdział nie nadaje przyszłym propozycjom C++29 statusu części C++26.
 
 Refleksja statyczna reprezentuje informacje o programie przez wartości compile-time, pozwala je badać oraz używać określonych rezultatów przez splicing. Nie jest runtime RTTI: nie polega na odnajdywaniu dowolnych klas po tekście w działającym procesie. Nie zmienia też automatycznie prywatnych pól w publiczny format serializacji. Generator oparty na refleksji musi nadal ustalić wersjonowanie schematu, wybór pól i znaczenie danych; zmiana nazwy pola nie powinna przypadkowo łamać trwałego protokołu.
 

@@ -1,0 +1,32 @@
+name: Verify C++ compendium
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        configuration: [Debug, Release]
+    env:
+      CXX: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validator tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Markdown and C++ snippets
+        run: bash scripts/verify.sh
+      - name: Configure practice
+        run: cmake -S praktyka -B build/praktyka -DCMAKE_BUILD_TYPE=${{ matrix.configuration }}
+      - name: Build practice
+        run: cmake --build build/praktyka --parallel 2 --config ${{ matrix.configuration }}
+      - name: Run practice tests
+        run: ctest --test-dir build/praktyka -C ${{ matrix.configuration }} --output-on-failure

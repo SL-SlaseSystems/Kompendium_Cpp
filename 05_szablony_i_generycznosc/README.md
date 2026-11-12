@@ -46,3 +46,11 @@ Potrafisz zaprojektować mały algorytm generyczny, ograniczyć go czytelnym con
 ## Co dalej
 
 Przejdź do [biblioteki standardowej](../06_biblioteka_standardowa/README.md), gdzie generyczne kontrakty spotykają się z kontenerami, iteratorami, algorytmami i ranges.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Projektowanie interfejsów generycznych](07_projektowanie_interfejsow_generycznych.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/05_szablony_i_generycznosc.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

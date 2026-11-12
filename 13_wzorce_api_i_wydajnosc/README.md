@@ -45,3 +45,9 @@ Potrafisz porównać co najmniej dwa projekty API pod względem lifetime, rozsze
 ## Co dalej
 
 Po tym dziale możesz wejść w [ścieżkę ekspercką](../zaawansowane/README.md) albo kontynuować do produkcyjnych narzędzi i systemów w dalszych działach, które zostaną połączone z głównym indeksem.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/13_wzorce_api_i_wydajnosc.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

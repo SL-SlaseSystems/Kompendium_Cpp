@@ -47,3 +47,13 @@ Potrafisz napisać niewielki program bez globalnego stanu, uzasadnić typ każde
 ## Co dalej
 
 Przejdź do [pamięci i czasu życia](../03_pamiec_i_czas_zycia/README.md). Jeżeli którykolwiek przykład z tego działu wymaga „bo kompilator tak robi”, wróć do reguł typu, zakresu lub kategorii wyrażenia.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Inicjalizacja i initializer_list](08_inicjalizacja_i_initializer_list.md)
+- [Kolejność ewaluacji i sequencing](09_kolejnosc_ewaluacji_i_sequencing.md)
+- [Arytmetyka, przepełnienia i float](10_arytmetyka_przepelnienia_i_float.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/02_podstawy_jezyka.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

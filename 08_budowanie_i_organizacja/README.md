@@ -46,3 +46,9 @@ Potrafisz utworzyć bibliotekę i program, poprawnie propagować wymagania użyc
 ## Co dalej
 
 Przejdź do [testowania i jakości](../09_testowanie_i_jakosc/README.md), aby budowanie stało się powtarzalną bramką jakości.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/08_budowanie_i_organizacja.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

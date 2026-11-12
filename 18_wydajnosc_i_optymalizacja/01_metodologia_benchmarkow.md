@@ -1,89 +1,155 @@
-[← Mapa działu](README.md) · [Główny spis treści](../README.md)
+[← Spis treści](../README.md)
 
 # Metodologia benchmarków
 
-Temat „metodologia benchmarków” jest częścią praktyki, w której celem jest prowadzić proces pomiar–hipoteza–zmiana–weryfikacja zamiast optymalizować na podstawie intuicji. Nie zaczynamy od wyboru produktu ani od kopiowania konfiguracji. Najpierw nazywamy chronioną własność, obserwowalne zachowanie i granicę odpowiedzialności. W tym obszarze trzeba pamiętać, że wynik zależy od danych, sprzętu, toolchainu, obciążenia i zakłóceń, a latencja, przepustowość oraz pamięć są różnymi metrykami. To rozróżnienie chroni przed przeniesieniem lokalnej obserwacji na wszystkie platformy oraz przed uznaniem zielonego narzędzia za dowód poprawności całego systemu.
+Benchmark jest eksperymentem odpowiadającym na konkretne pytanie o koszt pracy programu. „Wersja B jest szybsza” wymaga określenia danych, wielkości problemu, konfiguracji kompilacji, sprzętu i mierzonej wielkości. Czas całego żądania, czas CPU, przepustowość oraz liczba alokacji opisują inne własności. Dobry eksperyment ustala także, jaki wynik wpłynie na decyzję: oszczędność istotna dla użytkownika może być dużo większa niż różnica widoczna w mikrobenchmarku.
 
-Benchmark wymaga rozgrzewki, wielu próbek, jawnych danych i bariery uniemożliwiającej usunięcie mierzonej pracy. Mediana, rozkład i przedział niepewności mówią więcej niż pojedynczy najszybszy wynik.
-
-Najmniejszy przykład modeluje kontrolę jako dane. Kod jest samowystarczalny, nie wykonuje operacji uprzywilejowanych i nie celowo wywołuje błędów środowiska. W projekcie produkcyjnym nazwy kontroli pochodzą z modelu domenowego, a wynik jest przekazywany jako typowana wartość zamiast ginąć w logu.
-
-~~~cpp
-#include <array>
-#include <cassert>
-#include <string_view>
-
-struct Topic01MetodologiabenchCheck {
-    std::string_view name;
-    bool passed;
-};
-
-constexpr bool accepted(std::array<Topic01MetodologiabenchCheck, 3> checks) {
-    for (const auto& check : checks) {
-        if (!check.passed) return false;
-    }
-    return true;
-}
-
-int main() {
-    constexpr std::array checks{
-        Topic01MetodologiabenchCheck{"wejście rozpoznane", true},
-        Topic01MetodologiabenchCheck{"limit określony", true},
-        Topic01MetodologiabenchCheck{"wynik sprawdzony", true},
-    };
-    static_assert(accepted(checks));
-    assert(accepted(checks));
-}
-~~~
+Pierwszym punktem odniesienia jest poprawna wersja bazowa wykonująca tę samą pracę. Nie porównujemy parsera sprawdzającego błędy z funkcją przyjmującą wyłącznie poprawne dane, jeżeli produkcyjny kontrakt wymaga walidacji. Przed pomiarem obie implementacje powinny przejść te same testy poprawności. Następnie zmieniamy jedną hipotezę, na przykład sposób przechodzenia przez dane, i mierzymy skutek. Optymalizacja, która zmienia wynik, nie jest równoważnym rozwiązaniem.
 
 ## Jak to działa krok po kroku
 
-Pierwszy krok dla zagadnienia „metodologia benchmarków” to zapisanie scenariusza sukcesu i co najmniej trzech klas awarii. Osobno potraktuj błąd danych, błąd zależności oraz przekroczenie limitu czasu lub zasobu. Każda klasa powinna mieć właściciela decyzji: odrzucenie wejścia, ponowienie, degradację, zatrzymanie procesu albo alarm. Bez tego kod zaczyna przypadkowo mieszać politykę biznesową z detalem biblioteki.
+Najpierw wybieramy obciążenie: rozmiar danych, rozkład wartości, udział trafień oraz stan pamięci podręcznej. Dane tworzymy poza mierzonym fragmentem, jeżeli pytanie dotyczy samego przetwarzania. Jeśli interesuje nas pełny koszt operacji, uwzględniamy również alokację, parsowanie i sprzątanie. W obu wariantach trzeba podać granice pomiaru. Inaczej ten sam kod może służyć do udowodnienia sprzecznych tez.
 
-Drugi krok polega na znalezieniu granicy, na której informacja jest jeszcze pełna. Walidacja powinna działać przed utratą kontekstu, a błąd powinien zachować przyczynę bez ujawniania sekretów. Jeśli operacja tworzy zasób, od razu ustal ownership, czas życia i sposób zwalniania. Jeśli dotyka świata zewnętrznego, dodaj deadline, limit rozmiaru oraz kontrolę anulowania. Domyślna wartość ma być bezpieczna i widoczna w konfiguracji.
+Poniższy program mierzy całe partie sumowania. Dane zależą od argumentów uruchomienia, wynik jest użyty po pomiarze, a każda iteracja zmienia jeden element. Ta modyfikacja zapobiega prostemu zastąpieniu identycznych wywołań jednym obliczeniem, ale stanowi również część mierzonej pracy. Program pokazuje konstrukcję eksperymentu, a nie przenośną barierę optymalizacji.
 
-Trzeci krok to zbudowanie testu dla kontraktu, nie dla prywatnego układu funkcji. Test obejmuje poprawny przypadek, granicę i reprezentatywną awarię. Dla zachowania zależnego od platformy zapisujemy macierz środowisk zamiast warunku, który zawsze przechodzi na komputerze autora. Wynik narzędzia archiwizujemy tylko wtedy, gdy pomaga odtworzyć decyzję.
+~~~cpp
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <numeric>
+#include <vector>
 
-Na końcu integrujemy kontrolę z lokalnym przepływem pracy. Szybki test działa często, pełna weryfikacja działa przed wysłaniem, a CI odtwarza ją w czystym środowisku. Każdy eksperyment ma wariant bazowy, kontrolę usunięcia kodu przez optymalizator i zapis środowiska. Wynik lokalny nie staje się obietnicą uniwersalnego przyspieszenia.
+int main(int argc, char**) {
+    constexpr std::size_t count = 1U << 18;
+    constexpr std::size_t rounds = 32;
+    std::vector<std::uint32_t> data(count);
+    std::uint64_t state = static_cast<std::uint64_t>(argc);
+    for (auto& value : data) {
+        state = state * 6364136223846793005ULL + 1;
+        value = static_cast<std::uint32_t>(state >> 32);
+    }
+    std::vector<double> samples;
+    std::uint64_t checksum{};
+    for (std::size_t sample = 0; sample < 7; ++sample) {
+        const auto begin = std::chrono::steady_clock::now();
+        for (std::size_t round = 0; round < rounds; ++round) {
+            data[round] ^= static_cast<std::uint32_t>(sample + round);
+            checksum += std::accumulate(data.begin(), data.end(),
+                                        std::uint64_t{0});
+        }
+        const auto end = std::chrono::steady_clock::now();
+        samples.push_back(
+            std::chrono::duration<double, std::milli>(end - begin).count());
+    }
+    std::ranges::sort(samples);
+    std::cout << "batch_ms min=" << samples.front()
+              << " median=" << samples[samples.size() / 2]
+              << " max=" << samples.back()
+              << " checksum=" << checksum << '\n';
+}
+~~~
+
+`steady_clock` nadaje się do pomiaru upływu czasu, ponieważ nie jest zegarem kalendarzowym podlegającym korektom daty. Nie oznacza to nieograniczonej rozdzielczości ani braku kosztu odczytu. Partia powinna trwać wystarczająco długo, aby narzut zegara nie dominował nad badaną pracą. Dla bardzo krótkich funkcji używamy narzędzia benchmarkowego z odpowiednim mechanizmem użycia wyniku oraz sprawdzamy wygenerowany kod.
+
+Przykład kompilujemy z optymalizacją, na przykład `clang++ -std=c++23 -O3 bench.cpp -o bench`, i uruchamiamy poza debuggerem. Konfigurację diagnostyczną lub sanitizer mierzymy osobno, jeżeli właśnie ona jest przedmiotem pytania. Wydruk sumy kontrolnej utrzymuje zależność od wyniku, lecz sama obserwowalność nie zabrania kompilatorowi zastosowania szybszego równoważnego algorytmu. Celem jest pomiar wykonywanego programu, dlatego analiza asemblera może być częścią weryfikacji hipotezy.
 
 ## Pogłębienie mechanizmu
 
-Zagadnienie „metodologia benchmarków” ma co najmniej trzy poziomy kontraktu. Poziom języka mówi, co gwarantuje C++ i biblioteka standardowa. Poziom narzędzia obejmuje flagi kompilatora, bibliotekę zewnętrzną, format albo runtime. Poziom operacyjny obejmuje konfigurację procesu, uprawnienia, dane i zachowanie zależności. Błąd dokumentacji często powstaje wtedy, gdy gwarancję jednego poziomu przypisuje się innemu.
+Wersja bazowa ma dwa zastosowania. Poprzednia implementacja pokazuje praktyczny zysk. Pusty lub uproszczony przebieg szkieletu pomiarowego pomaga ocenić narzut pętli, zegara i infrastruktury. Nie odejmujemy go automatycznie od każdego wyniku: składniki kosztu nie muszą dodawać się niezależnie, a odejmowanie dwóch bliskich zaszumionych liczb może pogorszyć wynik. Jeżeli narzut dominuje, lepiej zwiększyć partię lub zmienić metodę.
 
-Nie wystarczy opisać ścieżki sukcesu. Dobra implementacja określa stan po częściowym wykonaniu: które efekty już zaszły, co można bezpiecznie powtórzyć, co trzeba posprzątać i jak odróżnić brak wyniku od wyniku pustego. RAII pomaga zamknąć zasób lokalny, ale nie cofa automatycznie efektu w obcym procesie. Transakcja lub protokół kompensacji są osobną decyzją.
+Zapisujemy wiele próbek, a nie pojedynczy najlepszy czas. Minimum przybliża wykonanie najmniej zakłócone, mediana opisuje typowy wynik, a rozrzut pokazuje stabilność eksperymentu. Żadna z tych liczb sama nie jest uniwersalnym estymatorem. Raport powinien zachować próbki i liczbę powtórzeń. Przy małej różnicy między wersjami trzeba sprawdzić, czy jest większa niż zwykła zmienność; dwie cyfry po przecinku nie zwiększają wiarygodności danych.
 
-Obserwowalność projektujemy razem z kontraktem. Zdarzenie powinno zawierać stabilny rodzaj operacji, wynik i identyfikator korelacji, lecz nie kopiować nieograniczonego wejścia. Metryka pokazuje trend, log zachowuje kontekst pojedynczego zdarzenia, a ślad łączy pracę przez granice. Każdy sygnał ma koszt i politykę retencji. Wrażliwe dane redagujemy przed przekazaniem do warstwy telemetrycznej.
+Na wynik wpływają częstotliwość procesora, temperatura, migracja między rdzeniami, inne procesy, stan alokatora, cache i przewidywanie skoków. Mały rozrzut nie wyklucza błędu systematycznego. Dokumentacja [LLVM Benchmarking tips](https://llvm.org/docs/Benchmarking.html) podkreśla potrzebę powtórzeń i kontroli zakłóceń. W praktyce zapisujemy warunki oraz przeplatamy uruchomienia wersji, aby powolne nagrzewanie komputera nie faworyzowało stale pierwszej lub ostatniej implementacji.
 
-Wydajność oceniamy dopiero na reprezentatywnym obciążeniu. Usprawnienie, które pomija walidację, limit albo raportowanie błędu, zmienia kontrakt i nie jest równoważną optymalizacją. Najpierw zapisujemy bazę pomiarową, następnie jedną hipotezę i kryterium odrzucenia. Dzięki temu decyzja dotycząca „metodologia benchmarków” pozostaje sprawdzalna po zmianie sprzętu lub toolchainu.
+Rozgrzewka ma sens, jeśli produkcyjne użycie także pracuje w stanie ustalonym. Nie wolno nią usuwać kosztu, który użytkownik faktycznie ponosi przy zimnym starcie. Osobno mierzymy pierwszy odczyt pliku, kolejne odczyty z cache oraz pracę na danych większych od dostępnej pamięci podręcznej. Jedna nazwa „odczyt” kryje wtedy kilka różnych eksperymentów.
+
+Dla usług przepustowość i opóźnienie muszą być analizowane razem. Stała liczba klientów może zmniejszać tempo wysyłania żądań, gdy serwer zwalnia, ukrywając narastanie kolejki. Generator obciążenia powinien odpowiadać modelowi ruchu, który chcemy badać. Raport zapisuje rozmiar próby, czas trwania, liczbę równoczesnych operacji, błędy oraz percentyle opóźnienia. Średnia z udanych odpowiedzi pomijająca timeouty może wyglądać dobrze właśnie wtedy, gdy usługa odrzuca najtrudniejsze żądania.
+
+Dane eksperymentu powinny wystarczać do jego odtworzenia: identyfikator kodu, dokładna komenda budowania, wersja kompilatora i biblioteki standardowej, wariant konfiguracji oraz generator danych. Zachowujemy również wersję bazową. Zmiana kompilatora albo zależności może przyspieszyć obie implementacje inaczej, dlatego porównanie wyniku dzisiejszego kandydata z liczbą zapisaną miesiąc wcześniej jest słabsze niż ponowne uruchomienie obu wersji w tych samych warunkach.
 
 ## Drugi przykład
 
-Przed implementacją przydaje się krótka karta decyzji. Nie jest ona składnią konkretnego produktu; to przenośny zapis warunków, który później można odwzorować na kod, konfigurację i testy.
+Porównanie wyszukiwania liniowego z binarnym wymaga tej samej semantyki: odpowiedzi, czy element istnieje. Dane są posortowane, a zapytania obejmują trafienia oraz braki. Pierwszy przebieg mierzy wersję bazową, drugi alternatywę; program nie wystarcza do rozstrzygnięcia statystycznego, dlatego powtarzamy go także z odwróconą kolejnością pomiarów.
 
-~~~text
-temat: metodologia benchmarków
-wejście: nazwane, ograniczone, walidowane na granicy
-sukces: mierzalny efekt i jawny właściciel wyniku
-awarie: dane / zależność / czas / zasób / anulowanie
-cleanup: idempotentny albo chroniony stanem
-telemetria: wynik bez sekretów i nieograniczonej cardinality
-testy: sukces, granica, błąd, częściowe wykonanie
+~~~cpp
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <numeric>
+#include <span>
+#include <stdexcept>
+#include <vector>
+
+bool linear(std::span<const int> data, int key) {
+    return std::ranges::find(data, key) != data.end();
+}
+
+bool binary(std::span<const int> data, int key) {
+    return std::ranges::binary_search(data, key);
+}
+
+struct Result { double milliseconds; std::uint64_t hits; };
+
+Result measure(bool (*lookup)(std::span<const int>, int),
+               std::span<const int> data, std::span<const int> queries) {
+    std::uint64_t hits{};
+    const auto begin = std::chrono::steady_clock::now();
+    for (int key : queries) hits += lookup(data, key);
+    const auto end = std::chrono::steady_clock::now();
+    return {std::chrono::duration<double, std::milli>(end - begin).count(),
+            hits};
+}
+
+int main(int argc, char**) {
+    std::vector<int> data(4096);
+    std::iota(data.begin(), data.end(), 0);
+    std::vector<int> queries(20000);
+    std::uint64_t state = static_cast<std::uint64_t>(argc);
+    for (int& key : queries) {
+        state = state * 6364136223846793005ULL + 1;
+        key = static_cast<int>((state >> 32) % 8192);
+    }
+    const auto baseline = measure(linear, data, queries);
+    const auto candidate = measure(binary, data, queries);
+    if (baseline.hits != candidate.hits) {
+        throw std::runtime_error("rozne wyniki wyszukiwania");
+    }
+    std::cout << "linear_ms=" << baseline.milliseconds
+              << " binary_ms=" << candidate.milliseconds
+              << " hits=" << baseline.hits << '\n';
+}
 ~~~
 
-Kartę trzeba skonfrontować z realnym API. Jeżeli biblioteka nie pozwala ustawić deadline, decyzja może wymagać innej biblioteki albo izolacji procesu. Jeżeli typ błędu gubi kod przyczyny, adapter powinien przetłumaczyć go na słownik aplikacji. Jeśli cleanup może zawieść, destruktor nie jest dobrym miejscem na raportowanie jedynego śladu; potrzebna jest jawna operacja zamknięcia i bezpieczny fallback RAII.
+Koszt sortowania nie występuje w pomiarze, ponieważ kontrakt zakłada dane już posortowane. Jeżeli aplikacja otrzymuje losową tablicę i wykonuje jedno zapytanie, dodanie sortowania może odwrócić decyzję. Dla małej liczby elementów liniowy przebieg bywa konkurencyjny dzięki lokalności. Te zależności trzeba zmierzyć, a nie wyprowadzać bezpośrednio z samych klas złożoności.
 
-Drugi test powinien zakładać, że zależność odpowie w najgorszym dozwolonym momencie. Sprawdź budżet czasu całej operacji, a nie tylko pojedynczego wywołania. Następnie wprowadź kontrolowany błąd i potwierdź stan końcowy. To ćwiczenie ujawnia ukryte założenia znacznie wcześniej niż rozbudowany test end-to-end uruchamiany dopiero przed wydaniem.
+Nie ustawiamy automatycznego progu regresji na podstawie jednego pomiaru lokalnego. Najpierw badamy zwykły rozrzut środowiska CI i wybieramy stabilne scenariusze. Przekroczenie progu powinno zachować próbki oraz konfigurację do analizy, zamiast jedynie wyświetlić czerwony status. Przy dużej zmienności można wydzielić dedykowaną maszynę pomiarową lub potraktować wynik jako sygnał do ponownego eksperymentu. Wspólny serwer budowania mierzy często także obciążenie pozostałych zadań, a nie wyłącznie koszt zmienionego kodu.
 
 ## Porównanie i decyzje
 
-Najprostsze rozwiązanie dla „metodologia benchmarków” jest dobrym punktem startowym, jeśli zachowuje kontrakt i daje się obserwować. Rozbudowana warstwa abstrakcji ma sens, gdy izoluje rzeczywistą zmienność: platformę, bibliotekę, protokół albo politykę. Abstrakcja dodana wyłącznie „na przyszłość” zwiększa liczbę stanów i może ukryć istotne ograniczenia zewnętrznego API.
+Mikrobenchmark pozwala odizolować mechanizm i szybko odrzucić hipotezę. Benchmark całej aplikacji pokazuje wpływ na rzeczywistą ścieżkę, uwzględniając inne koszty. Profilowanie pomaga wybrać fragment warty poprawy. Łączymy te narzędzia: zmniejszenie kosztu funkcji o połowę nie daje podobnego przyspieszenia programu, jeśli funkcja stanowi niewielką część całego wykonania. Nie przenosimy też pojedynczego wyniku w nanosekundach na inny procesor i kompilator.
 
-Automatyczna kontrola daje szybki, powtarzalny sygnał, natomiast review ocenia kontekst i konsekwencje. Test potwierdza wybrane przypadki, analiza statyczna bada model bez uruchomienia, a monitoring pokazuje zachowanie prawdziwego obciążenia. Dojrzały proces łączy te perspektywy i jawnie dokumentuje obszary, których aktualnie nie potrafi udowodnić.
+**Zadanie 1.** Wersje różnią się o 2%, a próbki pojedynczej wersji mają rozrzut 10%. Jaką decyzję można podjąć?
 
-Decyzję zapisujemy wraz z warunkiem ponownej oceny: wzrostem wolumenu, nową platformą, zmianą ABI, innym profilem zagrożeń albo wymaganiem zgodności. Dzięki temu kompromis nie zamienia się w przypadkową tradycję. Źródło pierwotne dla tego działu stanowi [Google Benchmark User Guide](https://github.com/google/benchmark/blob/main/docs/user_guide.md); dokładne opcje zawsze sprawdzaj dla używanej wersji narzędzia.
+<details><summary>Rozwiązanie</summary>
+
+Obecny eksperyment nie daje stabilnego sygnału do wyboru. Zbadaj zakłócenia, zwiększ czas partii i liczbę powtórzeń, przeplataj wersje oraz zachowaj surowe próbki. Nie publikuj 2% jako potwierdzonego przyspieszenia na podstawie pojedynczych pomiarów.
+
+</details>
+
+**Zadanie 2.** Nowy kontener przyspiesza wyszukiwanie, lecz wymaga drogiego przygotowania. Jak wyznaczyć opłacalność?
+
+<details><summary>Rozwiązanie</summary>
+
+Zmierz przygotowanie i koszt zapytania dla reprezentatywnych danych. Porównaj koszt całkowity przy różnych liczbach zapytań, uwzględniając aktualizacje oraz pamięć. Punkt opłacalności zależy od częstotliwości użycia i nie wynika z samego benchmarku funkcji wyszukującej.
+
+</details>
 
 ## Powiązane tematy
 
 - [Mapa działu](README.md)
 - [Zestaw ćwiczeń](ZESTAW-CWICZEN.md)
-- [Google Benchmark User Guide](https://github.com/google/benchmark/blob/main/docs/user_guide.md)
+- [Profilowanie CPU](02_profilowanie_cpu.md)
+- [Cache, lokalność i layout danych](04_cache_lokalnosc_i_layout_danych.md)

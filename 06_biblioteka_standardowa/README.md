@@ -47,3 +47,11 @@ Potrafisz uzasadnić kontener i algorytm dla rzeczywistego wzorca dostępu, wska
 ## Co dalej
 
 Przejdź do rozdziału [Wyjątki: try, catch i throw](../07_bledy_i_kontrakty/01_wyjatki_try_catch_throw.md), aby zacząć opisywać niepowodzenia operacji na typach i kontenerach bez utraty inwariantów.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Unicode, UTF-8 i ścisłe parsowanie](08_unicode_utf8_i_parsowanie.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/06_biblioteka_standardowa.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

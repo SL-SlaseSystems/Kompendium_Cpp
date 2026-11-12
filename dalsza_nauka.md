@@ -4,6 +4,8 @@
 
 Po przejściu podstaw wybierz ścieżkę odpowiadającą projektom. Każda specjalizacja nadal wymaga solidnego lifetime, RAII, testów i narzędzi diagnostycznych.
 
+Jeśli już programujesz w C++, zacznij od [diagnozy 24 problemów](test_diagnostyczny.md) i [pogłębionej ścieżki](sciezka_nauki.md). Do każdej specjalizacji wracaj z konkretnym projektem i dowodami jego poprawności. [Laboratoria](praktyka/README.md) oraz [zadania działowe](cwiczenia/README.md) pomagają sprawdzić, czy umiesz zastosować mechanizm poza przykładem z rozdziału.
+
 ## Narzędzia CLI
 
 Przejdź wprowadzenie, typy, RAII, string, kontenery, błędy, filesystem, chrono i CMake. Dodaj parsowanie argumentów przez bibliotekę zewnętrzną tylko po zdefiniowaniu modelu konfiguracji. Ćwiczenie: narzędzie indeksujące pliki, używające `filesystem`, `expected` lub jawnego typu błędu oraz testów katalogu tymczasowego.

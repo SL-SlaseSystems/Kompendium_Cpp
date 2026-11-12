@@ -1,89 +1,127 @@
-[← Mapa działu](README.md) · [Główny spis treści](../README.md)
+[← Spis treści](../README.md)
 
 # Transakcje i poziomy izolacji
 
-Temat „transakcje i poziomy izolacji” jest częścią praktyki, w której celem jest łączyć model danych, transakcje i RAII bez mylenia gwarancji bazy z gwarancjami wrappera C++. Nie zaczynamy od wyboru produktu ani od kopiowania konfiguracji. Najpierw nazywamy chronioną własność, obserwowalne zachowanie i granicę odpowiedzialności. W tym obszarze trzeba pamiętać, że SQL i SQLite nie są częścią ISO C++, a awaria może nastąpić między operacją w pamięci, zapisem w bazie i odpowiedzią dla klienta. To rozróżnienie chroni przed przeniesieniem lokalnej obserwacji na wszystkie platformy oraz przed uznaniem zielonego narzędzia za dowód poprawności całego systemu.
+Transakcja wyznacza jednostkę zatwierdzenia, lecz sama obecność `BEGIN` nie wystarcza do ochrony reguły biznesowej. Jeżeli dwie decyzje zależą od odczytanej liczby wolnych miejsc, trzeba ustalić, czy mogą jednocześnie użyć tej samej informacji. Izolacja określa dopuszczalne historie współbieżnych transakcji. Trwałość odpowiada na inne pytanie: co pozostanie po awarii po potwierdzonym zatwierdzeniu. Nie wyprowadzaj jednej gwarancji z drugiej.
 
-RAII może wywołać rollback przy opuszczeniu zakresu, ale nie gwarantuje, że commit się udał. Poziom izolacji opisuje widoczne anomalie konkretnego silnika; nie należy wnioskować o nim z samej obecności klasy `Transaction`.
-
-Najmniejszy przykład modeluje kontrolę jako dane. Kod jest samowystarczalny, nie wykonuje operacji uprzywilejowanych i nie celowo wywołuje błędów środowiska. W projekcie produkcyjnym nazwy kontroli pochodzą z modelu domenowego, a wynik jest przekazywany jako typowana wartość zamiast ginąć w logu.
-
-~~~cpp
-#include <array>
-#include <cassert>
-#include <string_view>
-
-struct Topic03TransakcjeipozioCheck {
-    std::string_view name;
-    bool passed;
-};
-
-constexpr bool accepted(std::array<Topic03TransakcjeipozioCheck, 3> checks) {
-    for (const auto& check : checks) {
-        if (!check.passed) return false;
-    }
-    return true;
-}
-
-int main() {
-    constexpr std::array checks{
-        Topic03TransakcjeipozioCheck{"wejście rozpoznane", true},
-        Topic03TransakcjeipozioCheck{"limit określony", true},
-        Topic03TransakcjeipozioCheck{"wynik sprawdzony", true},
-    };
-    static_assert(accepted(checks));
-    assert(accepted(checks));
-}
-~~~
+W C++ typ `Transaction` może pilnować, aby zakres zakończył się jawnym `commit()` albo awaryjnym rollbackiem. Nie potrafi jednak nadać silnikowi dodatkowego poziomu izolacji. Nie usunie również niepewności, gdy po wysłaniu COMMIT połączenie zostało zerwane przed odebraniem wyniku. W takim przypadku aplikacja potrzebuje sposobu odszukania wyniku operacji po stabilnym identyfikatorze.
 
 ## Jak to działa krok po kroku
 
-Pierwszy krok dla zagadnienia „transakcje i poziomy izolacji” to zapisanie scenariusza sukcesu i co najmniej trzech klas awarii. Osobno potraktuj błąd danych, błąd zależności oraz przekroczenie limitu czasu lub zasobu. Każda klasa powinna mieć właściciela decyzji: odrzucenie wejścia, ponowienie, degradację, zatrzymanie procesu albo alarm. Bez tego kod zaczyna przypadkowo mieszać politykę biznesową z detalem biblioteki.
+Rozpocznij od niezmiennika, a nie od nazwy poziomu. W grafiku dyżurów co najmniej jedna osoba musi pozostawać dostępna. Operacja wypisania lekarza odczytuje liczbę dyżurujących i zmienia jego własny wiersz, jeżeli liczba przekracza jeden. Dwie takie operacje na różnych wierszach mogą nie kolidować zapisem, mimo że razem łamią regułę.
 
-Drugi krok polega na znalezieniu granicy, na której informacja jest jeszcze pełna. Walidacja powinna działać przed utratą kontekstu, a błąd powinien zachować przyczynę bez ujawniania sekretów. Jeśli operacja tworzy zasób, od razu ustal ownership, czas życia i sposób zwalniania. Jeśli dotyka świata zewnętrznego, dodaj deadline, limit rozmiaru oraz kontrolę anulowania. Domyślna wartość ma być bezpieczna i widoczna w konfiguracji.
+Pierwszy przykład jest harmonogramem dla **dwóch sesji PostgreSQL**, nie jednym skryptem wykonywanym od góry. Polecenia uruchamiaj w podanej kolejności, zachowując otwarte transakcje. Schemat tworzysz raz, poza nimi. Warunek biznesowy celowo jest decyzją aplikacji po odczycie wyniku; nie stanowi ograniczenia zadeklarowanego w tabeli.
 
-Trzeci krok to zbudowanie testu dla kontraktu, nie dla prywatnego układu funkcji. Test obejmuje poprawny przypadek, granicę i reprezentatywną awarię. Dla zachowania zależnego od platformy zapisujemy macierz środowisk zamiast warunku, który zawsze przechodzi na komputerze autora. Wynik narzędzia archiwizujemy tylko wtedy, gdy pomaga odtworzyć decyzję.
+~~~sql
+-- Przygotowanie, osobna sesja administracyjna:
+CREATE TABLE dyzur (
+    lekarz integer PRIMARY KEY,
+    aktywny boolean NOT NULL
+);
+INSERT INTO dyzur VALUES (1, true), (2, true);
 
-Na końcu integrujemy kontrolę z lokalnym przepływem pracy. Szybki test działa często, pełna weryfikacja działa przed wysłaniem, a CI odtwarza ją w czystym środowisku. Zapytania parametryzujemy, ownership uchwytów zamykamy w RAII, a rollback testujemy. Poziom izolacji i trwałość opisujemy dla konkretnego silnika oraz konfiguracji.
+-- Krok 1, sesja A:
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM dyzur WHERE aktywny; -- 2
+
+-- Krok 2, sesja B:
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM dyzur WHERE aktywny; -- 2
+
+-- Krok 3, sesja A: aplikacja uznała, że może wypisać lekarza 1.
+UPDATE dyzur SET aktywny = false WHERE lekarz = 1;
+COMMIT;
+
+-- Krok 4, sesja B: nadal działa decyzja oparta na wyniku 2.
+UPDATE dyzur SET aktywny = false WHERE lekarz = 2;
+COMMIT;
+
+-- Po obu commitach, dowolna sesja:
+SELECT count(*) FROM dyzur WHERE aktywny; -- 0
+~~~
+
+To write skew: spójne odczyty indywidualnych transakcji prowadzą do niespójnej decyzji zbiorowej. Gdyby A wykonała się w całości przed B, B odczytałaby jeden dyżur i odmówiła zmiany. Odwrotna kolejność także pozostawiłaby jedną osobę. Uzyskanego wyniku nie da się więc wyjaśnić żadną szeregową kolejnością tych dwóch operacji.
+
+Po odtworzeniu schematu można zmienić oba `BEGIN` na `SERIALIZABLE`. W PostgreSQL takie zależności mogą spowodować odrzucenie jednej transakcji jako błędu serializacji. Aplikacja powtarza wtedy całą decyzję z nowym odczytem, a nie samo nieudane `UPDATE`. Nie zakładaj, że zawsze przegra wskazana sesja ani że konflikt ujawni się dopiero przy COMMIT.
 
 ## Pogłębienie mechanizmu
 
-Zagadnienie „transakcje i poziomy izolacji” ma co najmniej trzy poziomy kontraktu. Poziom języka mówi, co gwarantuje C++ i biblioteka standardowa. Poziom narzędzia obejmuje flagi kompilatora, bibliotekę zewnętrzną, format albo runtime. Poziom operacyjny obejmuje konfigurację procesu, uprawnienia, dane i zachowanie zależności. Błąd dokumentacji często powstaje wtedy, gdy gwarancję jednego poziomu przypisuje się innemu.
+W PostgreSQL Read Committed nadaje zwykłemu SELECT migawkę na początku polecenia. Repeatable Read zachowuje migawkę od pierwszego polecenia niebędącego sterowaniem transakcją; zapobiega także fantomom, lecz dopuszcza anomalie serializacji. Read Uncommitted zachowuje się tam jak Read Committed. Serializable chroni efekt równoważny szeregowemu wykonaniu zatwierdzonych transakcji, kosztem możliwości ich odrzucania. To gwarancje konkretnego silnika, nie uniwersalna interpretacja nazw SQL. [Dokumentacja PostgreSQL: izolacja](https://www.postgresql.org/docs/current/transaction-iso.html).
 
-Nie wystarczy opisać ścieżki sukcesu. Dobra implementacja określa stan po częściowym wykonaniu: które efekty już zaszły, co można bezpiecznie powtórzyć, co trzeba posprzątać i jak odróżnić brak wyniku od wyniku pustego. RAII pomaga zamknąć zasób lokalny, ale nie cofa automatycznie efektu w obcym procesie. Transakcja lub protokół kompensacji są osobną decyzją.
+Niepowtarzalny odczyt oznacza zmianę wartości już odczytanego wiersza; fantom oznacza zmianę zbioru spełniającego predykat. Zwalczanie ich nie wyczerpuje wszystkich reguł biznesowych, co pokazuje dyżur. Inny błąd, utracona aktualizacja, powstaje przy schemacie „odczytaj saldo, oblicz w C++, zapisz stałą wartość”. Dla pojedynczego licznika lepsze bywa atomowe `UPDATE ... SET saldo = saldo + :delta`, z warunkiem i sprawdzeniem liczby zmienionych wierszy.
 
-Obserwowalność projektujemy razem z kontraktem. Zdarzenie powinno zawierać stabilny rodzaj operacji, wynik i identyfikator korelacji, lecz nie kopiować nieograniczonego wejścia. Metryka pokazuje trend, log zachowuje kontekst pojedynczego zdarzenia, a ślad łączy pracę przez granice. Każdy sygnał ma koszt i politykę retencji. Wrażliwe dane redagujemy przed przekazaniem do warstwy telemetrycznej.
+Blokowanie musi obejmować wspólny punkt konfliktu. Zablokowanie wyłącznie wiersza wypisywanego lekarza pozostawia write skew, bo każdy blokuje inny wiersz. Alternatywą jest wiersz koordynujący konkretny grafik, blokowany przez wszystkich modyfikujących przed ponownym sprawdzeniem reguły. W PostgreSQL Read Committed osobne polecenie odczytu po uzyskaniu blokady zobaczy nowo zatwierdzone zmiany. Konsekwencją jest świadome szeregowanie operacji danego grafiku, a także obowiązek przestrzegania protokołu przez każdy zapis.
 
-Wydajność oceniamy dopiero na reprezentatywnym obciążeniu. Usprawnienie, które pomija walidację, limit albo raportowanie błędu, zmienia kontrakt i nie jest równoważną optymalizacją. Najpierw zapisujemy bazę pomiarową, następnie jedną hipotezę i kryterium odrzucenia. Dzięki temu decyzja dotycząca „transakcje i poziomy izolacji” pozostaje sprawdzalna po zmianie sprzętu lub toolchainu.
+Nie trzymaj transakcji otwartej podczas rozmowy z użytkownikiem ani nieograniczonego wywołania HTTP. Długa transakcja przedłuża czas blokad i życia migawek. Krótka granica obejmująca walidację opartą na bieżących danych i zapis ułatwia bezpieczne ponowienie. Efekt zewnętrzny wyprowadź przez outbox lub inny jawny protokół; rollback bazy nie cofnie wysłanego e-maila.
 
 ## Drugi przykład
 
-Przed implementacją przydaje się krótka karta decyzji. Nie jest ona składnią konkretnego produktu; to przenośny zapis warunków, który później można odwzorować na kod, konfigurację i testy.
+SQLite nie udostępnia takiej samej palety poziomów jak PostgreSQL. Typowo izoluje połączenia, dopuszczając jednego pisarza naraz. W rollback journal czytelnicy mogą współistnieć z początkiem zapisu, lecz przed zmianą pliku bazy pisarz potrzebuje dostępu wyłącznego. WAL pozwala czytelnikowi zachować starą migawkę podczas zapisu innego połączenia. Próba awansu nieaktualnej migawki do pisarza może zakończyć się `SQLITE_BUSY_SNAPSHOT`. [SQLite: izolacja](https://www.sqlite.org/isolation.html).
 
-~~~text
-temat: transakcje i poziomy izolacji
-wejście: nazwane, ograniczone, walidowane na granicy
-sukces: mierzalny efekt i jawny właściciel wyniku
-awarie: dane / zależność / czas / zasób / anulowanie
-cleanup: idempotentny albo chroniony stanem
-telemetria: wynik bez sekretów i nieograniczonej cardinality
-testy: sukces, granica, błąd, częściowe wykonanie
+Poniższy harmonogram wymaga plikowej bazy `demo.db` i dwóch niezależnych połączeń bez shared cache. Polecenie ustawienia WAL wykonaj przed rozpoczęciem sesji. Zwykłe `:memory:` na każdym połączeniu utworzyłoby dwie różne bazy i nie odtworzyłoby mechanizmu.
+
+~~~sql
+-- Przygotowanie, raz:
+PRAGMA journal_mode = WAL;
+CREATE TABLE stan (id INTEGER PRIMARY KEY, wartosc INTEGER NOT NULL);
+INSERT INTO stan VALUES (1, 10);
+
+-- Krok 1, połączenie A:
+BEGIN;
+SELECT wartosc FROM stan WHERE id = 1; -- 10, migawka ustalona
+
+-- Krok 2, połączenie B:
+BEGIN IMMEDIATE;
+UPDATE stan SET wartosc = 20 WHERE id = 1;
+COMMIT;
+
+-- Krok 3, połączenie A:
+SELECT wartosc FROM stan WHERE id = 1; -- nadal 10
+UPDATE stan SET wartosc = wartosc + 1 WHERE id = 1;
+-- SQLITE_BUSY_SNAPSHOT (517 przy udostępnieniu rozszerzonego kodu)
+ROLLBACK;
+
+-- Krok 4, połączenie A: cała decyzja od nowa
+BEGIN IMMEDIATE;
+SELECT wartosc FROM stan WHERE id = 1; -- 20
+UPDATE stan SET wartosc = wartosc + 1 WHERE id = 1;
+COMMIT;
 ~~~
 
-Kartę trzeba skonfrontować z realnym API. Jeżeli biblioteka nie pozwala ustawić deadline, decyzja może wymagać innej biblioteki albo izolacji procesu. Jeżeli typ błędu gubi kod przyczyny, adapter powinien przetłumaczyć go na słownik aplikacji. Jeśli cleanup może zawieść, destruktor nie jest dobrym miejscem na raportowanie jedynego śladu; potrzebna jest jawna operacja zamknięcia i bezpieczny fallback RAII.
+`BEGIN DEFERRED` odkłada wybór transakcji odczytu lub zapisu do dostępu do danych. `BEGIN IMMEDIATE` od razu próbuje rozpocząć zapis i może zwrócić BUSY. W WAL `EXCLUSIVE` zachowuje się pod tym względem jak `IMMEDIATE`; w innych trybach dodatkowo blokuje czytelników. COMMIT zwracający BUSY może pozostawić transakcję aktywną i pozwolić powtórzyć sam COMMIT. [SQLite: sterowanie transakcjami](https://www.sqlite.org/lang_transaction.html).
 
-Drugi test powinien zakładać, że zależność odpowie w najgorszym dozwolonym momencie. Sprawdź budżet czasu całej operacji, a nie tylko pojedynczego wywołania. Następnie wprowadź kontrolowany błąd i potwierdź stan końcowy. To ćwiczenie ujawnia ukryte założenia znacznie wcześniej niż rozbudowany test end-to-end uruchamiany dopiero przed wydaniem.
+To ostatnie rozróżnienie jest ważne dla adaptera C++: polityka „każdy BUSY oznacza nową transakcję” jest za mało precyzyjna. Dla starej migawki samo czekanie nie naprawi historii; trzeba zakończyć transakcję i odczytać dane ponownie. Dla oczekiwania na blokadę ograniczony busy timeout może pomóc. Nadal musi mieścić się w deadline operacji.
 
 ## Porównanie i decyzje
 
-Najprostsze rozwiązanie dla „transakcje i poziomy izolacji” jest dobrym punktem startowym, jeśli zachowuje kontrakt i daje się obserwować. Rozbudowana warstwa abstrakcji ma sens, gdy izoluje rzeczywistą zmienność: platformę, bibliotekę, protokół albo politykę. Abstrakcja dodana wyłącznie „na przyszłość” zwiększa liczbę stanów i może ukryć istotne ograniczenia zewnętrznego API.
+Wybieraj najpierw sposób ochrony reguły: ograniczenie unikalności, pojedyncze warunkowe UPDATE, jawne blokady albo serializowalną transakcję. Każde rozwiązanie wymaga innego testu współbieżności. Test polegający na dwukrotnym uruchomieniu funkcji kolejno nie sprawdza żadnego z pokazanych przeplotów; potrzebne są kontrolowane punkty zatrzymania między odczytem i zapisem.
 
-Automatyczna kontrola daje szybki, powtarzalny sygnał, natomiast review ocenia kontekst i konsekwencje. Test potwierdza wybrane przypadki, analiza statyczna bada model bez uruchomienia, a monitoring pokazuje zachowanie prawdziwego obciążenia. Dojrzały proces łączy te perspektywy i jawnie dokumentuje obszary, których aktualnie nie potrafi udowodnić.
+W wrapperze rozróżnij stany aktywna, zatwierdzona i zakończona błędem. `commit()` ma zwrócić wynik, zanim obiekt uzna transakcję za zakończoną. Destruktor wykonuje niezgłaszający cleanup i nie maskuje pierwotnego wyjątku. Po błędzie sprawdź kontrakt sterownika oraz stan połączenia; nie oddawaj do puli sesji pozostawionej w otwartej transakcji.
 
-Decyzję zapisujemy wraz z warunkiem ponownej oceny: wzrostem wolumenu, nową platformą, zmianą ABI, innym profilem zagrożeń albo wymaganiem zgodności. Dzięki temu kompromis nie zamienia się w przypadkową tradycję. Źródło pierwotne dla tego działu stanowi [SQLite Documentation](https://www.sqlite.org/docs.html); dokładne opcje zawsze sprawdzaj dla używanej wersji narzędzia.
+Budżet ponowień dotyczy całej operacji wraz z pobraniem połączenia i oczekiwaniem na blokady. Przy ponowieniu przelicz decyzję biznesową z nowych danych, zachowując identyfikator logicznej operacji. Dzięki temu poprawa izolacji nie zmieni się w niekontrolowane mnożenie pracy podczas przeciążenia.
+
+## Ćwiczenia
+
+1. Każdy lekarz blokuje `FOR UPDATE` wyłącznie swój wiersz. Czy naprawia to pierwszy przykład?
+
+<details>
+<summary>Rozwiązanie z uzasadnieniem</summary>
+
+Nie. Zbiory zapisywanych i blokowanych wierszy nadal są rozłączne, a odczyt dotyczy obu. Potrzebny jest wspólny punkt konfliktu, właściwe ograniczenie modelu albo Serializable z obsługą ponowienia całej transakcji.
+
+</details>
+
+2. Po `SQLITE_BUSY_SNAPSHOT` program czeka sekundę i powtarza UPDATE bez ROLLBACK. Czy odzyskał aktualną migawkę?
+
+<details>
+<summary>Rozwiązanie z uzasadnieniem</summary>
+
+Nie. Migawka należy do trwającej transakcji. Zakończ ją, rozpocznij nową i ponownie wykonaj odczyty, które uzasadniały zapis. Sam upływ czasu nie zmienia podstawy wcześniejszej decyzji.
+
+</details>
 
 ## Powiązane tematy
 
-- [Mapa działu](README.md)
-- [Zestaw ćwiczeń](ZESTAW-CWICZEN.md)
-- [SQLite Documentation](https://www.sqlite.org/docs.html)
+- [SQLite i RAII połączenia](02_sqlite_i_raii_polaczenia.md)
+- [Migracje, pooling i odporność](05_migracje_pooling_i_odpornosc.md)
+- [Outbox, inbox i deduplikacja](../24_messaging_i_systemy_rozproszone/05_outbox_inbox_i_deduplication.md)

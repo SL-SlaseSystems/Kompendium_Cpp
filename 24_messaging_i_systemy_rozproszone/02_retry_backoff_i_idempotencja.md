@@ -1,89 +1,176 @@
-[← Mapa działu](README.md) · [Główny spis treści](../README.md)
+[← Spis treści](../README.md)
 
-# Retry backoff i idempotencja
+# Retry, backoff i idempotencja
 
-Temat „retry backoff i idempotencja” jest częścią praktyki, w której celem jest modelować awarie częściowe, dostarczenie wiadomości i spójność przepływu biznesowego. Nie zaczynamy od wyboru produktu ani od kopiowania konfiguracji. Najpierw nazywamy chronioną własność, obserwowalne zachowanie i granicę odpowiedzialności. W tym obszarze trzeba pamiętać, że broker, producent, konsument i baza mogą potwierdzać pracę w różnych momentach, dlatego duplikat i opóźnienie są normalnymi stanami systemu. To rozróżnienie chroni przed przeniesieniem lokalnej obserwacji na wszystkie platformy oraz przed uznaniem zielonego narzędzia za dowód poprawności całego systemu.
+Ponowienie przekształca niepewność sieciową w dodatkową pracę. Jeżeli serwer nie odebrał żądania, kolejna próba może uratować operację. Jeżeli wykonał zmianę, lecz zgubiła się odpowiedź, ta sama próba może wykonać zmianę ponownie. Ograniczenie liczby prób chroni zasoby, ale nie zapewnia poprawności biznesowej. Idempotencja chroni znaczenie operacji, lecz nie ogranicza jej kosztu. Potrzebujesz obu mechanizmów.
 
-Backoff z jitterem rozprasza zsynchronizowane ponowienia, lecz nadal potrzebuje limitu oraz deadline. Klucz idempotencji identyfikuje logiczną operację i ma trwałość co najmniej równą oknu możliwych duplikatów.
-
-Najmniejszy przykład modeluje kontrolę jako dane. Kod jest samowystarczalny, nie wykonuje operacji uprzywilejowanych i nie celowo wywołuje błędów środowiska. W projekcie produkcyjnym nazwy kontroli pochodzą z modelu domenowego, a wynik jest przekazywany jako typowana wartość zamiast ginąć w logu.
-
-~~~cpp
-#include <array>
-#include <cassert>
-#include <string_view>
-
-struct Topic02RetrybackoffiideCheck {
-    std::string_view name;
-    bool passed;
-};
-
-constexpr bool accepted(std::array<Topic02RetrybackoffiideCheck, 3> checks) {
-    for (const auto& check : checks) {
-        if (!check.passed) return false;
-    }
-    return true;
-}
-
-int main() {
-    constexpr std::array checks{
-        Topic02RetrybackoffiideCheck{"wejście rozpoznane", true},
-        Topic02RetrybackoffiideCheck{"limit określony", true},
-        Topic02RetrybackoffiideCheck{"wynik sprawdzony", true},
-    };
-    static_assert(accepted(checks));
-    assert(accepted(checks));
-}
-~~~
+Rozróżniaj próbę transportową od operacji logicznej. Operacja „dodaj środki do portfela” ma jeden identyfikator i może składać się z kilku połączeń lub dostarczeń komunikatu. Każda próba dostaje osobny identyfikator diagnostyczny, ale zachowuje identyfikator operacji. Utworzenie nowego klucza idempotencji po timeout niweczy możliwość rozpoznania powtórzenia.
 
 ## Jak to działa krok po kroku
 
-Pierwszy krok dla zagadnienia „retry backoff i idempotencja” to zapisanie scenariusza sukcesu i co najmniej trzech klas awarii. Osobno potraktuj błąd danych, błąd zależności oraz przekroczenie limitu czasu lub zasobu. Każda klasa powinna mieć właściciela decyzji: odrzucenie wejścia, ponowienie, degradację, zatrzymanie procesu albo alarm. Bez tego kod zaczyna przypadkowo mieszać politykę biznesową z detalem biblioteki.
+Najpierw sklasyfikuj wynik. Błąd składni, odmowa autoryzacji i niespełniony warunek biznesowy zwykle nie poprawią się po odczekaniu. Przejściowe przeciążenie może uzasadniać kolejną próbę, o ile operację wolno powtórzyć. Nieznany wynik zmiany stanu wymaga kontraktu deduplikacji albo sprawdzenia stanu po stronie wykonawcy. Automatyczna pętla łapiąca wszystkie wyjątki nie ma takiej wiedzy.
 
-Drugi krok polega na znalezieniu granicy, na której informacja jest jeszcze pełna. Walidacja powinna działać przed utratą kontekstu, a błąd powinien zachować przyczynę bez ujawniania sekretów. Jeśli operacja tworzy zasób, od razu ustal ownership, czas życia i sposób zwalniania. Jeśli dotyka świata zewnętrznego, dodaj deadline, limit rozmiaru oraz kontrolę anulowania. Domyślna wartość ma być bezpieczna i widoczna w konfiguracji.
+Następnie wyznacz trzy ograniczenia: maksymalną liczbę prób, deadline całej operacji i timeout próby. Uwzględnij czas kolejki oraz oczekiwania pomiędzy próbami. Nie rozpoczynaj pracy, jeżeli pozostały czas nie pozwala już uzyskać przydatnego wyniku. Anulowanie powinno przerywać również backoff, aby zamykanie procesu nie czekało na koniec minutowego sleep.
 
-Trzeci krok to zbudowanie testu dla kontraktu, nie dla prywatnego układu funkcji. Test obejmuje poprawny przypadek, granicę i reprezentatywną awarię. Dla zachowania zależnego od platformy zapisujemy macierz środowisk zamiast warunku, który zawsze przechodzi na komputerze autora. Wynik narzędzia archiwizujemy tylko wtedy, gdy pomaga odtworzyć decyzję.
+Poniższy model używa zegara logicznego w milisekundach. Każda symulowana próba potrzebuje 90 ms; trzecia kończy się sukcesem. Nie ma tu transportu, prawdziwego oczekiwania ani samodzielnej oceny idempotencji. `again` oznacza wynik już zakwalifikowany przez warstwę znającą kontrakt operacji. Full jitter wybiera równomiernie czas od zera do aktualnego limitu.
 
-Na końcu integrujemy kontrolę z lokalnym przepływem pracy. Szybki test działa często, pełna weryfikacja działa przed wysłaniem, a CI odtwarza ją w czystym środowisku. Nie obiecujemy exactly once bez określenia zakresu. Retry obejmuje timeout, backoff, jitter, limit prób i idempotencję, a deduplikacja ma trwały klucz.
+~~~cpp
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <random>
+
+using Tick = std::uint64_t;
+enum class Status { success, again, permanent, budget };
+struct Result { Status status; unsigned attempts; Tick elapsed; };
+
+Tick grow(Tick value, Tick cap) {
+    assert(value <= cap);
+    return value > cap / 2 ? cap : std::min(cap, value * 2);
+}
+
+Result run(Tick budget, unsigned max_attempts, std::mt19937& rng) {
+    Tick now = 0;
+    Tick ceiling = 50;
+    constexpr Tick cap = 160;
+    unsigned attempts = 0;
+    while (attempts < max_attempts && now < budget) {
+        ++attempts;
+        Tick allowance = std::min<Tick>(100, budget - now);
+        constexpr Tick work = 90;
+        if (work >= allowance) {
+            now += allowance;
+            return {Status::budget, attempts, now};
+        }
+        now += work;
+        Status status = attempts == 3 ? Status::success : Status::again;
+        if (status != Status::again) return {status, attempts, now};
+        if (attempts == max_attempts) return {status, attempts, now};
+        Tick delay = std::uniform_int_distribution<Tick>(0, ceiling)(rng);
+        if (delay >= budget - now) return {Status::budget, attempts, now};
+        now += delay;
+        ceiling = grow(ceiling, cap);
+    }
+    return {Status::budget, attempts, now};
+}
+
+int main() {
+    std::mt19937 rng(17); // Stałe ziarno służy odtwarzalności przykładu.
+    auto ok = run(500, 4, rng);
+    assert(ok.status == Status::success && ok.attempts == 3);
+    auto short_budget = run(100, 4, rng);
+    assert(short_budget.status == Status::budget);
+    assert(short_budget.elapsed <= 100 && short_budget.attempts <= 2);
+    assert(grow(UINT64_MAX - 1, UINT64_MAX) == UINT64_MAX);
+    std::cout << "success after " << ok.attempts << " attempts\n";
+}
+~~~
+
+Limit rośnie z nasyceniem, więc nie obliczamy nieograniczonego `base * (1 << attempt)`. Taka formuła może przepełnić mnożenie albo przesunięcie przed zastosowaniem minimum. Równie ważne jest odejmowanie pozostałego czasu przed dodawaniem opóźnienia. Dane konfiguracyjne muszą być dodatnie, przeliczone na wspólną jednostkę i sprawdzone przed uruchomieniem pętli.
 
 ## Pogłębienie mechanizmu
 
-Zagadnienie „retry backoff i idempotencja” ma co najmniej trzy poziomy kontraktu. Poziom języka mówi, co gwarantuje C++ i biblioteka standardowa. Poziom narzędzia obejmuje flagi kompilatora, bibliotekę zewnętrzną, format albo runtime. Poziom operacyjny obejmuje konfigurację procesu, uprawnienia, dane i zachowanie zależności. Błąd dokumentacji często powstaje wtedy, gdy gwarancję jednego poziomu przypisuje się innemu.
+Stały backoff sprawia, że duża grupa klientów uderza ponownie w tych samych chwilach. Wzrost wykładniczy ogranicza częstotliwość kolejnych prób, a jitter rozprasza ich synchronizację. Nie zmniejsza jednak liczby klientów ani całkowitego kosztu operacji. Przy awarii potrzebne bywają także ograniczenie współbieżności, admission control i wspólny budżet ponowień na zależność.
 
-Nie wystarczy opisać ścieżki sukcesu. Dobra implementacja określa stan po częściowym wykonaniu: które efekty już zaszły, co można bezpiecznie powtórzyć, co trzeba posprzątać i jak odróżnić brak wyniku od wyniku pustego. RAII pomaga zamknąć zasób lokalny, ale nie cofa automatycznie efektu w obcym procesie. Transakcja lub protokół kompensacji są osobną decyzją.
+Unikaj retry na każdej warstwie. Trzy próby klienta, trzy próby adaptera i trzy dostarczenia brokera mogą uruchomić aż 27 prób wykonania jednego efektu. Wybierz właściciela polityki, propaguj deadline i udostępnij niższym warstwom informację o numerze próby. Mierz próbę oddzielnie od operacji; udana trzecia próba nie oznacza, że zależność obsłużyła tylko jedno żądanie.
 
-Obserwowalność projektujemy razem z kontraktem. Zdarzenie powinno zawierać stabilny rodzaj operacji, wynik i identyfikator korelacji, lecz nie kopiować nieograniczonego wejścia. Metryka pokazuje trend, log zachowuje kontekst pojedynczego zdarzenia, a ślad łączy pracę przez granice. Każdy sygnał ma koszt i politykę retencji. Wrażliwe dane redagujemy przed przekazaniem do warstwy telemetrycznej.
+HTTP opisuje idempotencję przez zamierzony efekt wielokrotnego identycznego żądania, a nie przez brak jakichkolwiek zapisów czy identyczny status odpowiedzi. Klient nie powinien automatycznie ponawiać nieidempotentnej metody bez dodatkowej wiedzy o bezpieczeństwie powtórzenia lub niewykonaniu pierwszej próby. [RFC 9110, §9.2.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2). Reguła ta dobrze ujawnia ogólny problem messagingu: utrata potwierdzenia nie oznacza utraty skutku.
 
-Wydajność oceniamy dopiero na reprezentatywnym obciążeniu. Usprawnienie, które pomija walidację, limit albo raportowanie błędu, zmienia kontrakt i nie jest równoważną optymalizacją. Najpierw zapisujemy bazę pomiarową, następnie jedną hipotezę i kryterium odrzucenia. Dzięki temu decyzja dotycząca „retry backoff i idempotencja” pozostaje sprawdzalna po zmianie sprzętu lub toolchainu.
+Rekord idempotencji powinien wiązać klucz, zakres uprawnień, kanoniczny opis żądania i wynik. Ten sam klucz z inną kwotą jest konfliktem, nie duplikatem sukcesu. Przy żądaniach równoległych potrzebujesz unikalności klucza i atomowego rozstrzygnięcia wyścigu. Stan `in_progress` wymaga protokołu odzyskiwania po awarii wykonawcy; sam znacznik w cache nie jest dowodem wykonania zmiany.
 
 ## Drugi przykład
 
-Przed implementacją przydaje się krótka karta decyzji. Nie jest ona składnią konkretnego produktu; to przenośny zapis warunków, który później można odwzorować na kod, konfigurację i testy.
+Ten program modeluje jedną portmonetkę oraz atomowe wykonanie w obrębie procesu. Mutex chroni sprawdzenie klucza, przydzielenie wyniku i zmianę salda. Rekord powstaje przed niezgłaszającą zmianą liczb, więc błąd alokacji mapy nie pozostawi wykonanego efektu bez rekordu. Nie zapewnia to odporności na utratę procesu: trwały wariant wymaga transakcji obejmującej rekord i saldo.
 
-~~~text
-temat: retry backoff i idempotencja
-wejście: nazwane, ograniczone, walidowane na granicy
-sukces: mierzalny efekt i jawny właściciel wyniku
-awarie: dane / zależność / czas / zasób / anulowanie
-cleanup: idempotentny albo chroniony stanem
-telemetria: wynik bez sekretów i nieograniczonej cardinality
-testy: sukces, granica, błąd, częściowe wykonanie
+~~~cpp
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+class Wallet {
+    struct Record { std::int64_t amount; std::int64_t balance_after; };
+    std::mutex mutex_;
+    std::int64_t balance_ = 0;
+    std::map<std::pair<std::string, std::string>, Record> records_;
+public:
+    std::int64_t credit(const std::string& tenant, const std::string& key,
+                        std::int64_t amount) {
+        if (key.empty() || amount <= 0) throw std::invalid_argument("request");
+        std::lock_guard lock(mutex_);
+        auto id = std::make_pair(tenant, key);
+        if (auto it = records_.find(id); it != records_.end()) {
+            if (it->second.amount != amount)
+                throw std::invalid_argument("idempotency key conflict");
+            return it->second.balance_after;
+        }
+        if (amount > std::numeric_limits<std::int64_t>::max() - balance_)
+            throw std::overflow_error("balance");
+        const auto next = balance_ + amount;
+        records_.emplace(std::move(id), Record{amount, next});
+        balance_ = next;
+        return next;
+    }
+};
+
+int main() {
+    Wallet wallet;
+    auto first = wallet.credit("shop-a", "operation-7", 500);
+    auto replay = wallet.credit("shop-a", "operation-7", 500);
+    assert(first == 500 && replay == first); // Utraconą odpowiedź odtwarzamy.
+    auto next = wallet.credit("shop-a", "operation-8", 200);
+    assert(next == 700);
+    bool conflict = false;
+    try { (void)wallet.credit("shop-a", "operation-7", 900); }
+    catch (const std::invalid_argument&) { conflict = true; }
+    assert(conflict);
+    std::cout << "first=" << first << " replay=" << replay
+              << " next=" << next << '\n';
+}
 ~~~
 
-Kartę trzeba skonfrontować z realnym API. Jeżeli biblioteka nie pozwala ustawić deadline, decyzja może wymagać innej biblioteki albo izolacji procesu. Jeżeli typ błędu gubi kod przyczyny, adapter powinien przetłumaczyć go na słownik aplikacji. Jeśli cleanup może zawieść, destruktor nie jest dobrym miejscem na raportowanie jedynego śladu; potrzebna jest jawna operacja zamknięcia i bezpieczny fallback RAII.
-
-Drugi test powinien zakładać, że zależność odpowie w najgorszym dozwolonym momencie. Sprawdź budżet czasu całej operacji, a nie tylko pojedynczego wywołania. Następnie wprowadź kontrolowany błąd i potwierdź stan końcowy. To ćwiczenie ujawnia ukryte założenia znacznie wcześniej niż rozbudowany test end-to-end uruchamiany dopiero przed wydaniem.
+Wynik duplikatu to zapisany wynik pierwszej operacji, nawet gdy aktualne saldo jest już inne. Gdybyśmy zwracali bieżące saldo, ponowienie otrzymałoby informację o późniejszych operacjach zamiast odtworzenia odpowiedzi. W rozbudowanym API zapis może obejmować status, identyfikator utworzonego obiektu i stabilną reprezentację odpowiedzi, z określonym zakresem danych wrażliwych.
 
 ## Porównanie i decyzje
 
-Najprostsze rozwiązanie dla „retry backoff i idempotencja” jest dobrym punktem startowym, jeśli zachowuje kontrakt i daje się obserwować. Rozbudowana warstwa abstrakcji ma sens, gdy izoluje rzeczywistą zmienność: platformę, bibliotekę, protokół albo politykę. Abstrakcja dodana wyłącznie „na przyszłość” zwiększa liczbę stanów i może ukryć istotne ograniczenia zewnętrznego API.
+Naturalnie idempotentne „ustaw wartość na 12” jest prostsze od „zwiększ o 12”, ale może nadpisać równoległą zmianę. Numer wersji lub warunek wstępny rozwiązuje inny problem: chroni przed zapisaniem decyzji opartej na starym stanie. Nie zastępuj deduplikacji kontrolą wersji bez analizy zachowania po utracie odpowiedzi.
 
-Automatyczna kontrola daje szybki, powtarzalny sygnał, natomiast review ocenia kontekst i konsekwencje. Test potwierdza wybrane przypadki, analiza statyczna bada model bez uruchomienia, a monitoring pokazuje zachowanie prawdziwego obciążenia. Dojrzały proces łączy te perspektywy i jawnie dokumentuje obszary, których aktualnie nie potrafi udowodnić.
+Przechowywanie rekordu i skutku w tej samej bazie pozwala połączyć je jedną transakcją. Jeżeli skutkiem jest wywołanie obcego operatora płatności, lokalny COMMIT nie obejmuje tego operatora. Przekaż mu stabilny klucz albo zastosuj protokół uzgadniania wyniku. Outbox zapewnia atomowość lokalnego zapisu i zamiaru wysłania, ale odbiorca nadal musi obsłużyć wielokrotne dostarczenie.
 
-Decyzję zapisujemy wraz z warunkiem ponownej oceny: wzrostem wolumenu, nową platformą, zmianą ABI, innym profilem zagrożeń albo wymaganiem zgodności. Dzięki temu kompromis nie zamienia się w przypadkową tradycję. Źródło pierwotne dla tego działu stanowi [RabbitMQ Reliability Guide](https://www.rabbitmq.com/docs/reliability); dokładne opcje zawsze sprawdzaj dla używanej wersji narzędzia.
+Retencja rekordu określa granicę gwarancji. Usunięcie klucza po godzinie oznacza, że duplikat po dwóch godzinach może wykonać efekt ponownie. Dobierz retencję do maksymalnego czasu redelivery, retry klienta i odzyskiwania po awarii. Sam hash treści jako klucz może przypadkowo scalić dwa celowo identyczne zakupy; identyczne dane nie zawsze oznaczają tę samą intencję.
+
+Przy brokerze przyjrzyj się dokładnej granicy potwierdzenia. Jeżeli konsument zatwierdzi zmianę w bazie, a następnie umrze przed ACK, broker może dostarczyć komunikat ponownie. Inbox zapisany w tej samej transakcji co zmiana pozwala rozpoznać ten przebieg. Odwrócenie kolejności, czyli ACK przed zmianą, usuwa duplikat kosztem ryzyka utraty pracy. Żadna kolejność dwóch niezależnych operacji nie tworzy automatycznie jednej transakcji rozproszonej.
+
+Budżet pojedynczego wywołania klienta może się skończyć wcześniej niż życie zlecenia w tle. Wtedy zwróć identyfikator operacji i jawny stan oczekiwania, zamiast uruchamiać coraz dłuższe synchroniczne retry. Dalsze dostarczenia nadal używają tego samego klucza i mają własne ograniczenia retencji oraz czasu wykonania. Rozróżnienie deadline odpowiedzi od terminu ważności zlecenia jest decyzją domenową, którą trzeba zapisać w kontrakcie.
+
+## Ćwiczenia
+
+1. Klient po timeout zmienia klucz operacji i ponawia to samo obciążenie. Serwer ma poprawną tabelę idempotencji. Czy zapobiegnie duplikatowi?
+
+<details>
+<summary>Rozwiązanie z uzasadnieniem</summary>
+
+Nie. Nowy klucz opisuje nową operację, więc serwer nie ma podstaw do scalenia żądań. Zachowaj klucz przez wszystkie próby i odtwarzanie operacji, a zmianę treści pod tym kluczem traktuj jako konflikt.
+
+</details>
+
+2. Limit backoff wynosi maksymalną wartość typu. Dlaczego `min(cap, delay * 2)` może być błędne?
+
+<details>
+<summary>Rozwiązanie z uzasadnieniem</summary>
+
+Mnożenie zachodzi przed minimum. Typ bez znaku zawinie wartość, a przepełnienie typu ze znakiem naruszy reguły języka. Sprawdź `delay > cap / 2` przed mnożeniem i w tym przypadku zwróć cap, tak jak w programie.
+
+</details>
 
 ## Powiązane tematy
 
-- [Mapa działu](README.md)
-- [Zestaw ćwiczeń](ZESTAW-CWICZEN.md)
-- [RabbitMQ Reliability Guide](https://www.rabbitmq.com/docs/reliability)
+- [Kolejki, brokerzy i delivery](01_kolejki_brokerzy_i_delivery.md)
+- [Outbox, inbox i deduplikacja](05_outbox_inbox_i_deduplication.md)
+- [Klient HTTP](../21_sieci_protokoly_i_api/05_klient_http_timeouty_retry_i_pooling.md)

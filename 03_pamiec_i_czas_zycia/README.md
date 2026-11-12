@@ -45,3 +45,11 @@ Umiesz przeanalizować ścieżki wyjątków i wczesnych wyjść, wykazać automa
 ## Co dalej
 
 Przejdź do [klas i modelu obiektowego](../04_klasy_i_model_obiektowy/README.md). Eksperckie przypadki lifetime i aliasingu znajdują się później w katalogu `zaawansowane`.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Zwracanie wartości, elision i lifetime](07_zwracanie_wartosci_elision_i_lifetime.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/03_pamiec_i_czas_zycia.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

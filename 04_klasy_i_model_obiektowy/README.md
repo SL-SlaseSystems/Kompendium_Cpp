@@ -46,3 +46,11 @@ Potrafisz zaprojektować typ wartościowy, klasę RAII i mały interfejs polimor
 ## Co dalej
 
 Przejdź do [szablonów i generyczności](../05_szablony_i_generycznosc/README.md), aby te same kontrakty wyrażać dla rodzin typów i algorytmów.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Silne typy, znaczenie porównań i kontrakt hash](07_silne_typy_porownania_i_hash.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/04_klasy_i_model_obiektowy.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

@@ -1,89 +1,129 @@
-[← Mapa działu](README.md) · [Główny spis treści](../README.md)
+[← Spis treści](../README.md)
 
 # Regresje git bisect i reprodukcja
 
-Temat „regresje git bisect i reprodukcja” jest częścią praktyki, w której celem jest zamieniać objaw w reprodukcję, hipotezę, dowód i bezpieczną poprawkę regresji. Nie zaczynamy od wyboru produktu ani od kopiowania konfiguracji. Najpierw nazywamy chronioną własność, obserwowalne zachowanie i granicę odpowiedzialności. W tym obszarze trzeba pamiętać, że log, stack trace i crash dump są obserwacjami konkretnego wykonania, a nie kompletnym wyjaśnieniem przyczyny. To rozróżnienie chroni przed przeniesieniem lokalnej obserwacji na wszystkie platformy oraz przed uznaniem zielonego narzędzia za dowód poprawności całego systemu.
+Regresja to obserwowalna własność, która działała w znanym stanie i przestała działać w późniejszym. Zanim zaczniemy przeglądać historię, potrzebujemy testu rozróżniającego te dwa stany. „Czasem pojawia się błąd” jest opisem problemu, lecz zbyt słabym predykatem dla automatycznego wyszukiwania. Najpierw utrwalamy dane, środowisko i oczekiwane zachowanie. Dopiero potem `git bisect` może zawężać zbiór podejrzanych zmian.
 
-Bisect zakłada test klasyfikujący commit jako dobry, zły lub niemożliwy do oceny. Reprodukcja musi unieruchomić dane i środowisko, inaczej algorytm może wskazać pierwszy commit skorelowany ze zmianą otoczenia.
-
-Najmniejszy przykład modeluje kontrolę jako dane. Kod jest samowystarczalny, nie wykonuje operacji uprzywilejowanych i nie celowo wywołuje błędów środowiska. W projekcie produkcyjnym nazwy kontroli pochodzą z modelu domenowego, a wynik jest przekazywany jako typowana wartość zamiast ginąć w logu.
-
-~~~cpp
-#include <array>
-#include <cassert>
-#include <string_view>
-
-struct Topic04RegresjegitbisecCheck {
-    std::string_view name;
-    bool passed;
-};
-
-constexpr bool accepted(std::array<Topic04RegresjegitbisecCheck, 3> checks) {
-    for (const auto& check : checks) {
-        if (!check.passed) return false;
-    }
-    return true;
-}
-
-int main() {
-    constexpr std::array checks{
-        Topic04RegresjegitbisecCheck{"wejście rozpoznane", true},
-        Topic04RegresjegitbisecCheck{"limit określony", true},
-        Topic04RegresjegitbisecCheck{"wynik sprawdzony", true},
-    };
-    static_assert(accepted(checks));
-    assert(accepted(checks));
-}
-~~~
+Narzędzie znajduje granicę między wynikami testu w grafie historii. Nie wyjaśnia mechanizmu błędu i nie gwarantuje, że wskazany commit jest jedyną przyczyną. Zmiana może ujawnić wcześniejszy błąd, wejść w interakcję z konfiguracją albo jedynie zmienić prawdopodobieństwo wyścigu. Wynik bisection jest bardzo użyteczną hipotezą popartą historią, którą trzeba potwierdzić na wskazanym commicie i jego rodzicu.
 
 ## Jak to działa krok po kroku
 
-Pierwszy krok dla zagadnienia „regresje git bisect i reprodukcja” to zapisanie scenariusza sukcesu i co najmniej trzech klas awarii. Osobno potraktuj błąd danych, błąd zależności oraz przekroczenie limitu czasu lub zasobu. Każda klasa powinna mieć właściciela decyzji: odrzucenie wejścia, ponowienie, degradację, zatrzymanie procesu albo alarm. Bez tego kod zaczyna przypadkowo mieszać politykę biznesową z detalem biblioteki.
+Przygotowujemy reprodukcję poza repozytorium: niezmienny plik wejściowy, skrypt sterujący i zapis wersji narzędzi. W raporcie umieszczamy identyfikator commita, kompilator, flagi, wersje zależności, system i komendę wykonania. Dla problemu losowego zachowujemy ziarno oraz warunki współbieżności. Sekrety i rzeczywiste dane użytkowników zastępujemy minimalnym zestawem zachowującym objaw. Suma kontrolna danych pozwala wykryć przypadkową zmianę reprodukcji podczas długiego dochodzenia.
 
-Drugi krok polega na znalezieniu granicy, na której informacja jest jeszcze pełna. Walidacja powinna działać przed utratą kontekstu, a błąd powinien zachować przyczynę bez ujawniania sekretów. Jeśli operacja tworzy zasób, od razu ustal ownership, czas życia i sposób zwalniania. Jeśli dotyka świata zewnętrznego, dodaj deadline, limit rozmiaru oraz kontrolę anulowania. Domyślna wartość ma być bezpieczna i widoczna w konfiguracji.
+Następnie uruchamiamy identyczny test na obu końcach zakresu. Dobry commit musi przejść, a zły odtworzyć wybrany objaw. Nie wystarcza informacja, że poprzednie wydanie „było stabilne”: mogło być budowane innym kompilatorem albo korzystać z innej usługi. Jeśli stary kod nie daje się zbudować w obecnym środowisku, trzeba odtworzyć dawny toolchain lub jawnie oznaczyć brak możliwości oceny.
 
-Trzeci krok to zbudowanie testu dla kontraktu, nie dla prywatnego układu funkcji. Test obejmuje poprawny przypadek, granicę i reprezentatywną awarię. Dla zachowania zależnego od platformy zapisujemy macierz środowisk zamiast warunku, który zawsze przechodzi na komputerze autora. Wynik narzędzia archiwizujemy tylko wtedy, gdy pomaga odtworzyć decyzję.
+Aby zachować bieżące zmiany, tworzymy osobny worktree z odłączonym `HEAD`. Poniższe nazwy tagów są przykładowe i należy wybrać istniejące granice własnego problemu. Ścieżka skryptu jest bezwzględna, ponieważ kolejne checkouty nie powinny podmieniać samego testu.
 
-Na końcu integrujemy kontrolę z lokalnym przepływem pracy. Szybki test działa często, pełna weryfikacja działa przed wysłaniem, a CI odtwarza ją w czystym środowisku. Oddzielamy polecenia GDB od LLDB i narzędzi Windows. Najpierw zachowujemy dowody, potem minimalizujemy przypadek, a po poprawce dodajemy test regresyjny.
+~~~sh
+good_ref=v1.4.0
+bad_ref=v1.5.0
+scratch=$(mktemp -d)
+repro_tree="$scratch/tree"
+git worktree add --detach "$repro_tree" "$bad_ref"
+git -C "$repro_tree" bisect start "$bad_ref" "$good_ref"
+git -C "$repro_tree" bisect run sh /absolute/repro/check-regression.sh
+git -C "$repro_tree" bisect log > /absolute/repro/bisect.log
+git -C "$repro_tree" bisect reset
+~~~
+
+Po zapisaniu potrzebnych artefaktów i sprawdzeniu `git -C "$repro_tree" status --short` można usunąć worktree przez `git worktree remove "$repro_tree"`. Nie potrzeba `reset --hard` ani czyszczenia katalogu, w którym użytkownik pracuje nad inną zmianą. Worktree ma osobne pliki robocze, ale korzysta ze wspólnego repozytorium; nie stanowi izolacji dla zewnętrznej bazy, cache czy konta chmurowego. Szczegóły opisuje [dokumentacja git-worktree](https://git-scm.com/docs/git-worktree).
 
 ## Pogłębienie mechanizmu
 
-Zagadnienie „regresje git bisect i reprodukcja” ma co najmniej trzy poziomy kontraktu. Poziom języka mówi, co gwarantuje C++ i biblioteka standardowa. Poziom narzędzia obejmuje flagi kompilatora, bibliotekę zewnętrzną, format albo runtime. Poziom operacyjny obejmuje konfigurację procesu, uprawnienia, dane i zachowanie zależności. Błąd dokumentacji często powstaje wtedy, gdy gwarancję jednego poziomu przypisuje się innemu.
+Skrypt przekazany do `git bisect run` jest klasyfikatorem. Kod zakończenia `0` oznacza dobry stan, `1` może oznaczać wykrytą regresję, a `125` brak możliwości przetestowania danego commita. Technicznie inne wartości od 1 do 127, z wyjątkiem 125, również oznaczają zły stan. Wartości poza tym zakresem przerywają automatyczny przebieg. Dlatego brak polecenia, zwykle sygnalizowany przez powłokę kodem 127, nie powinien przypadkowo oznaczać znalezienia regresji. Reguły podaje [git-bisect](https://git-scm.com/docs/git-bisect).
 
-Nie wystarczy opisać ścieżki sukcesu. Dobra implementacja określa stan po częściowym wykonaniu: które efekty już zaszły, co można bezpiecznie powtórzyć, co trzeba posprzątać i jak odróżnić brak wyniku od wyniku pustego. RAII pomaga zamknąć zasób lokalny, ale nie cofa automatycznie efektu w obcym procesie. Transakcja lub protokół kompensacji są osobną decyzją.
+Poniższy kompletny skrypt POSIX zakłada, że projekt ma cel `regression_probe`. Program ten przyjmuje utrwalony plik wejściowy i zwraca dokładnie `0` dla poprawnego zachowania, `1` dla badanego objawu oraz `2` dla błędu infrastruktury. Katalog kompilacji powstaje poza źródłami od nowa dla każdego commita, więc stary cache CMake nie zatruwa kolejnych wyników.
 
-Obserwowalność projektujemy razem z kontraktem. Zdarzenie powinno zawierać stabilny rodzaj operacji, wynik i identyfikator korelacji, lecz nie kopiować nieograniczonego wejścia. Metryka pokazuje trend, log zachowuje kontekst pojedynczego zdarzenia, a ślad łączy pracę przez granice. Każdy sygnał ma koszt i politykę retencji. Wrażliwe dane redagujemy przed przekazaniem do warstwy telemetrycznej.
+~~~sh
+#!/bin/sh
+# /absolute/repro/check-regression.sh
+set -u
+fixture=/absolute/repro/input.bin
+command -v cmake >/dev/null 2>&1 || exit 128
+[ -r "$fixture" ] || exit 128
+build_dir=$(mktemp -d) || exit 128
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
 
-Wydajność oceniamy dopiero na reprezentatywnym obciążeniu. Usprawnienie, które pomija walidację, limit albo raportowanie błędu, zmienia kontrakt i nie jest równoważną optymalizacją. Najpierw zapisujemy bazę pomiarową, następnie jedną hipotezę i kryterium odrzucenia. Dzięki temu decyzja dotycząca „regresje git bisect i reprodukcja” pozostaje sprawdzalna po zmianie sprzętu lub toolchainu.
+if ! cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Release; then
+    exit 125
+fi
+if ! cmake --build "$build_dir" --target regression_probe; then
+    exit 125
+fi
+"$build_dir/regression_probe" --input "$fixture"
+result=$?
+case "$result" in
+    0) exit 0 ;;
+    1) exit 1 ;;
+    2) exit 128 ;;
+    *) exit 128 ;;
+esac
+~~~
+
+`125` nie oznacza „raczej dobrze”. Pominięcie commitów w pobliżu granicy może pozostawić kilka nierozróżnialnych kandydatów. Wtedy raportujemy zbiór możliwości albo poprawiamy środowisko i powtarzamy test. Jeżeli badanym problemem jest właśnie przerwane budowanie, nie wolno klasyfikować każdej awarii kompilacji jako `125`: określony oczekiwany błąd powinien oznaczać zły stan. Klasyfikacja musi odpowiadać pytaniu eksperymentu.
+
+Automatyczny test powinien sprawdzać wybrany objaw, nie dowolne niezerowe zakończenie programu. Awaria DNS nie dowodzi regresji parsera. Dla problemu z wyścigiem wiele powtórzeń poprawia wykrywalność, lecz brak awarii nadal nie daje pewności. Ustalmy z góry liczbę prób, kryterium oraz stan „niejednoznaczny”. Przypadkowe klasyfikowanie kolejnych commitów może skierować algorytm do zupełnie niewłaściwej części historii.
 
 ## Drugi przykład
 
-Przed implementacją przydaje się krótka karta decyzji. Nie jest ona składnią konkretnego produktu; to przenośny zapis warunków, który później można odwzorować na kod, konfigurację i testy.
+Czasami checkout w ogóle nie jest potrzebny: chcemy zbudować migawkę źródeł w jednorazowym katalogu. Opcja `--no-checkout` przesuwa wtedy `BISECT_HEAD`, a skrypt pobiera jego zawartość przez `git archive`. To przydatne, gdy testy tworzą wiele plików albo narzędzia generujące nie potrafią pracować poza źródłami.
 
-~~~text
-temat: regresje git bisect i reprodukcja
-wejście: nazwane, ograniczone, walidowane na granicy
-sukces: mierzalny efekt i jawny właściciel wyniku
-awarie: dane / zależność / czas / zasób / anulowanie
-cleanup: idempotentny albo chroniony stanem
-telemetria: wynik bez sekretów i nieograniczonej cardinality
-testy: sukces, granica, błąd, częściowe wykonanie
+~~~sh
+# W osobnym worktree diagnostycznym:
+git bisect start --no-checkout "$bad_ref" "$good_ref"
+git bisect run bash /absolute/repro/check-archive.sh
+git bisect log > /absolute/repro/archive-bisect.log
+git bisect reset
 ~~~
 
-Kartę trzeba skonfrontować z realnym API. Jeżeli biblioteka nie pozwala ustawić deadline, decyzja może wymagać innej biblioteki albo izolacji procesu. Jeżeli typ błędu gubi kod przyczyny, adapter powinien przetłumaczyć go na słownik aplikacji. Jeśli cleanup może zawieść, destruktor nie jest dobrym miejscem na raportowanie jedynego śladu; potrzebna jest jawna operacja zamknięcia i bezpieczny fallback RAII.
+Skrypt poniżej jest alternatywą dla poprzedniego. Uruchamia ten sam sterownik po rozpakowaniu migawki. Wymaga Bash ze względu na `pipefail`; dzięki temu awaria `git archive` nie zostanie zamaskowana sukcesem ostatniego procesu potoku.
 
-Drugi test powinien zakładać, że zależność odpowie w najgorszym dozwolonym momencie. Sprawdź budżet czasu całej operacji, a nie tylko pojedynczego wywołania. Następnie wprowadź kontrolowany błąd i potwierdź stan końcowy. To ćwiczenie ujawnia ukryte założenia znacznie wcześniej niż rozbudowany test end-to-end uruchamiany dopiero przed wydaniem.
+~~~sh
+#!/bin/bash
+# /absolute/repro/check-archive.sh
+set -u -o pipefail
+snapshot=$(mktemp -d) || exit 128
+trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
+commit=$(git rev-parse --verify BISECT_HEAD) || exit 128
+if ! git archive "$commit" | tar -x -C "$snapshot"; then
+    exit 128
+fi
+cd "$snapshot" || exit 128
+sh /absolute/repro/check-regression.sh
+exit $?
+~~~
+
+Archiwum nie zawiera automatycznie pełnej zawartości submodułów ani obiektów przechowywanych poza repozytorium. Pliki generowane i zależności trzeba odtworzyć zgodnie z daną rewizją. Narzędzia korzystające z `git describe` również wymagają uwagi, bo migawka nie ma katalogu `.git`. Ten wariant jest właściwy tylko wtedy, gdy sposób materializacji źródeł zachowuje warunki reprodukcji.
+
+Po wskazaniu granicy zapisujemy log bisection oraz weryfikujemy podejrzany commit i jego rodzica na świeżych katalogach budowania. Porównujemy zmianę z objawem i formułujemy mechanizm, na przykład nieprawidłowe unieważnienie iteratora. Poprawka powinna zawierać test regresyjny zawodzący przed naprawą. Samo cofnięcie podejrzanego commita może potwierdzić korelację, ale nie zawsze wyjaśni interakcję z pozostałymi zmianami.
+
+Historia z merge commitami wymaga doprecyzowania pytania. Domyślne wyszukiwanie może wejść do gałęzi, której pośrednie rewizje nie były samodzielnie wydawane. Jeżeli interesuje nas moment włączenia regresji do głównej linii, opcja `--first-parent` może wskazać merge jako granicę. To inny eksperyment niż szukanie pierwotnej zmiany na gałęzi; po znalezieniu merge można osobno zbadać jego rodziców. Nie wybieramy tej opcji tylko po to, aby ukryć niewygodne wyniki budowania.
+
+Do zgłoszenia warto dołączyć małe archiwum reprodukcji z instrukcją jednego uruchomienia i oczekiwanym rezultatem. Osoba analizująca błąd nie powinna odtwarzać ścieżek autora ani szukać brakującego pliku wejściowego w logach. Po zminimalizowaniu danych ponownie sprawdzamy obie granice historii: uproszczenie reprodukcji mogło przypadkowo zmienić badany problem.
 
 ## Porównanie i decyzje
 
-Najprostsze rozwiązanie dla „regresje git bisect i reprodukcja” jest dobrym punktem startowym, jeśli zachowuje kontrakt i daje się obserwować. Rozbudowana warstwa abstrakcji ma sens, gdy izoluje rzeczywistą zmienność: platformę, bibliotekę, protokół albo politykę. Abstrakcja dodana wyłącznie „na przyszłość” zwiększa liczbę stanów i może ukryć istotne ograniczenia zewnętrznego API.
+Ręczne `bisect good` i `bisect bad` sprawdzają się przy małej liczbie kosztownych ocen wymagających analizy człowieka. `bisect run` daje powtarzalność i zachowuje jednolite kryterium, ale wymaga starannie zaprojektowanego klasyfikatora. Ograniczenie wyszukiwania do ścieżek przyspiesza pracę tylko wtedy, gdy rzeczywiście wiadomo, gdzie powstała przyczyna. Błąd w konfiguracji, zależności lub generatorze może leżeć poza katalogiem z wadliwą funkcją.
 
-Automatyczna kontrola daje szybki, powtarzalny sygnał, natomiast review ocenia kontekst i konsekwencje. Test potwierdza wybrane przypadki, analiza statyczna bada model bez uruchomienia, a monitoring pokazuje zachowanie prawdziwego obciążenia. Dojrzały proces łączy te perspektywy i jawnie dokumentuje obszary, których aktualnie nie potrafi udowodnić.
+**Zadanie 1.** Stary commit nie kompiluje się, ponieważ nie wspiera aktualnego kompilatora. Czy zwrócić `1`?
 
-Decyzję zapisujemy wraz z warunkiem ponownej oceny: wzrostem wolumenu, nową platformą, zmianą ABI, innym profilem zagrożeń albo wymaganiem zgodności. Dzięki temu kompromis nie zamienia się w przypadkową tradycję. Źródło pierwotne dla tego działu stanowi [GDB Documentation](https://sourceware.org/gdb/current/onlinedocs/gdb.html/); dokładne opcje zawsze sprawdzaj dla używanej wersji narzędzia.
+<details><summary>Rozwiązanie</summary>
+
+Jeżeli szukamy regresji działania programu, taka rewizja jest nieprzetestowana, więc zwracamy `125` albo odtwarzamy wspierany toolchain. Gdy pytaniem jest zgodność z tym konkretnym kompilatorem, błąd budowania może być właściwym kryterium złego stanu. Najpierw ustalamy pytanie.
+
+</details>
+
+**Zadanie 2.** Jeden z dziesięciu przebiegów dobrego commita kończy się błędem usługi zewnętrznej. Jak przygotować bisection parsera?
+
+<details><summary>Rozwiązanie</summary>
+
+Usuń zależność od żywej usługi przez utrwaloną odpowiedź albo lokalny kontrolowany serwer. Oddziel awarię infrastruktury od błędu parsowania. Potwierdź powtarzalne wyniki na obu granicach, zanim uruchomisz automatyczne wyszukiwanie.
+
+</details>
 
 ## Powiązane tematy
 
 - [Mapa działu](README.md)
 - [Zestaw ćwiczeń](ZESTAW-CWICZEN.md)
-- [GDB Documentation](https://sourceware.org/gdb/current/onlinedocs/gdb.html/)
+- [Strategia debugowania i MRE](01_strategia_debugowania_i_mre.md)
+- [Git i praca z repozytorium](../14_warsztat_profesjonalisty/05_git_i_praca_z_repozytorium.md)

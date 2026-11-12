@@ -45,3 +45,11 @@ Potrafisz narysować relacje synchronizes-with i happens-before, wskazać właś
 ## Co dalej
 
 Przejdź do [I/O i systemu](../11_io_i_system/README.md), gdzie współbieżność spotyka się z operacjami blokującymi i zasobami systemowymi.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+- [Ograniczona kolejka, backpressure i zamykanie](06_kolejka_backpressure_i_zamykanie.md)
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/10_wspolbieznosc.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

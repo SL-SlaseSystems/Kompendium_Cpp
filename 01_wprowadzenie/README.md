@@ -44,3 +44,9 @@ Dział jest opanowany, jeśli potrafisz bez IDE zbudować program z dwóch plik�
 ## Co dalej
 
 Przejdź do [podstaw języka](../02_podstawy_jezyka/README.md). Do tego działu wracaj, gdy późniejsze materiały wymagają nowych flag kompilatora, osobnego linkowania lub rozróżnienia standardu od implementacji.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/01_wprowadzenie.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

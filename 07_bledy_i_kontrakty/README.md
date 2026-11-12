@@ -43,3 +43,9 @@ Umiesz zaprojektować operację z jawną taksonomią błędów, udowodnić basic
 ## Co dalej
 
 Przejdź do [budowania i organizacji](../08_budowanie_i_organizacja/README.md), gdzie kontrakty rozciągają się na granice plików, bibliotek i procesu linkowania.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/07_bledy_i_kontrakty.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

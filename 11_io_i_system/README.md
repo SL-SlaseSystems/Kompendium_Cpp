@@ -44,3 +44,9 @@ Potrafisz bezpiecznie zapisać i odczytać dane, obsłużyć błąd bez pozostaw
 ## Co dalej
 
 Przejdź do [współczesnego C++](../12_wspolczesny_cpp/README.md), aby uporządkować pochodzenie używanych mechanizmów i ich dostępność w toolchainie.
+
+## Pogłębienie dla osoby programującej w C++
+
+Przed ponowną lekturą rozwiąż scenariusze i uzasadnij odpowiedzi regułą języka lub kontraktem. Wynik eksperymentu porównuj z przewidywaniem; kompilacja nie jest dowodem poprawności wykonania.
+
+[Sześć zadań z rozwiązaniami](../cwiczenia/11_io_i_system.md) uzupełnia dotychczasowy [zestaw ćwiczeń](ZESTAW-CWICZEN.md). Pełną kolejność pogłębiania opisuje [ścieżka nauki](../sciezka_nauki.md).

@@ -1,89 +1,86 @@
-[← Mapa działu](README.md) · [Główny spis treści](../README.md)
+[← Spis treści](../README.md)
 
 # Pipeline build test analyze
 
-Temat „pipeline build test analyze” jest częścią praktyki, w której celem jest przeprowadzić zmianę od commitu przez bramki jakości do podpisanego artefaktu, wdrożenia i rollbacku. Nie zaczynamy od wyboru produktu ani od kopiowania konfiguracji. Najpierw nazywamy chronioną własność, obserwowalne zachowanie i granicę odpowiedzialności. W tym obszarze trzeba pamiętać, że pipeline jest wykonywalnym opisem procesu, a wynik zależy od runnera, toolchainu, cache, sekretów i zewnętrznych usług. To rozróżnienie chroni przed przeniesieniem lokalnej obserwacji na wszystkie platformy oraz przed uznaniem zielonego narzędzia za dowód poprawności całego systemu.
+**Wymagania wstępne:** kompilacja i linkowanie, testy procesu, CMake oraz podstawy repozytorium Git. Pracujemy na dołączonym [workflow](../.github/workflows/verify.yml), a nie na modelu z trzema wartościami bool. Dodanie konfiguracji do repozytorium nie oznacza jeszcze udanego zdalnego przebiegu; jego wynik wymaga wykonania przez usługę CI.
 
-Pipeline dzieli etapy według zależności i wartości informacji zwrotnej: konfiguracja, build, test, analiza i pakowanie. Każdy job zaczyna z jawnym wejściem, publikuje diagnostykę po błędzie i nie polega na stanie poprzedniego runnera.
-
-Najmniejszy przykład modeluje kontrolę jako dane. Kod jest samowystarczalny, nie wykonuje operacji uprzywilejowanych i nie celowo wywołuje błędów środowiska. W projekcie produkcyjnym nazwy kontroli pochodzą z modelu domenowego, a wynik jest przekazywany jako typowana wartość zamiast ginąć w logu.
-
-~~~cpp
-#include <array>
-#include <cassert>
-#include <string_view>
-
-struct Topic01PipelinebuildtesCheck {
-    std::string_view name;
-    bool passed;
-};
-
-constexpr bool accepted(std::array<Topic01PipelinebuildtesCheck, 3> checks) {
-    for (const auto& check : checks) {
-        if (!check.passed) return false;
-    }
-    return true;
-}
-
-int main() {
-    constexpr std::array checks{
-        Topic01PipelinebuildtesCheck{"wejście rozpoznane", true},
-        Topic01PipelinebuildtesCheck{"limit określony", true},
-        Topic01PipelinebuildtesCheck{"wynik sprawdzony", true},
-    };
-    static_assert(accepted(checks));
-    assert(accepted(checks));
-}
-~~~
+Pipeline to program sterujący innymi programami. Musi przekazywać błędy i uruchamiać kolejne kroki na właściwych artefaktach. W tym repozytorium kontrola ma trzy różne produkty: wyniki testów walidatora, kontrolę dokumentów i składni przykładów oraz wykonanie laboratoriów. Każdy z nich odpowiada na inne pytanie. Pozytywny wynik pierwszego nie zastępuje dwóch pozostałych.
 
 ## Jak to działa krok po kroku
 
-Pierwszy krok dla zagadnienia „pipeline build test analyze” to zapisanie scenariusza sukcesu i co najmniej trzech klas awarii. Osobno potraktuj błąd danych, błąd zależności oraz przekroczenie limitu czasu lub zasobu. Każda klasa powinna mieć właściciela decyzji: odrzucenie wejścia, ponowienie, degradację, zatrzymanie procesu albo alarm. Bez tego kod zaczyna przypadkowo mieszać politykę biznesową z detalem biblioteki.
+Dołączony workflow uruchamia macierz dwóch kompilatorów i dwóch konfiguracji. Poniższy fragment pokazuje te same wybory; kompletny plik zawiera także pobranie repozytorium i kroki kontroli dokumentów:
 
-Drugi krok polega na znalezieniu granicy, na której informacja jest jeszcze pełna. Walidacja powinna działać przed utratą kontekstu, a błąd powinien zachować przyczynę bez ujawniania sekretów. Jeśli operacja tworzy zasób, od razu ustal ownership, czas życia i sposób zwalniania. Jeśli dotyka świata zewnętrznego, dodaj deadline, limit rozmiaru oraz kontrolę anulowania. Domyślna wartość ma być bezpieczna i widoczna w konfiguracji.
+~~~yaml
+strategy:
+  fail-fast: false
+  matrix:
+    compiler: [g++, clang++]
+    configuration: [Debug, Release]
+env:
+  CXX: ${{ matrix.compiler }}
+steps:
+  - name: Configure practice
+    run: cmake -S praktyka -B build/praktyka -DCMAKE_BUILD_TYPE=${{ matrix.configuration }}
+  - name: Build practice
+    run: cmake --build build/praktyka --parallel 2 --config ${{ matrix.configuration }}
+  - name: Run practice tests
+    run: ctest --test-dir build/praktyka -C ${{ matrix.configuration }} --output-on-failure
+~~~
 
-Trzeci krok to zbudowanie testu dla kontraktu, nie dla prywatnego układu funkcji. Test obejmuje poprawny przypadek, granicę i reprezentatywną awarię. Dla zachowania zależnego od platformy zapisujemy macierz środowisk zamiast warunku, który zawsze przechodzi na komputerze autora. Wynik narzędzia archiwizujemy tylko wtedy, gdy pomaga odtworzyć decyzję.
+Każdy job zaczyna ze świeżym workspace. Ustawione `CXX` wybiera kompilator przy pierwszej konfiguracji, a CMake zapisuje wynik w cache. Nie zmieniamy kompilatora w już skonfigurowanym katalogu jednego joba. Macierz daje cztery niezależne próby; `fail-fast: false` pozwala zachować diagnostykę pozostałych konfiguracji po porażce jednej. Nie oznacza, że błędy mają być ignorowane.
 
-Na końcu integrujemy kontrolę z lokalnym przepływem pracy. Szybki test działa często, pełna weryfikacja działa przed wysłaniem, a CI odtwarza ją w czystym środowisku. Koncepcje pozostają neutralne względem dostawcy. Przykład GitHub Actions nie udaje standardu, a macierz GCC, Clang i MSVC nie zakłada wspólnego ABI.
+Konfiguracja wyraża graf, build wytwarza programy, a CTest je wykonuje. Jeżeli kompilacja zawiedzie, zwykłe zależności kroków zatrzymują testowanie nieaktualnego artefaktu. Test ma zwrócić niezerowy kod przy błędzie i rzeczywiście wykonać badane działanie. W laboratoriach mechanizm `check` nie znika po zdefiniowaniu `NDEBUG`, więc sprawdzenia zachowania pozostają aktywne w Release.
 
 ## Pogłębienie mechanizmu
 
-Zagadnienie „pipeline build test analyze” ma co najmniej trzy poziomy kontraktu. Poziom języka mówi, co gwarantuje C++ i biblioteka standardowa. Poziom narzędzia obejmuje flagi kompilatora, bibliotekę zewnętrzną, format albo runtime. Poziom operacyjny obejmuje konfigurację procesu, uprawnienia, dane i zachowanie zależności. Błąd dokumentacji często powstaje wtedy, gdy gwarancję jednego poziomu przypisuje się innemu.
+Kontrola Markdown uruchamia kompilator z `-fsyntax-only`. Sprawdza składnię i instancjację użytego kodu, ale nie wykonuje linkowania ani programu. Wiele klas problemów pozostaje poza jej zakresem: brakujący symbol przy linkowaniu, dangling view podczas wykonania, naruszenie semantyki porównania czy zakleszczenie. Dlatego osobny projekt CMake tworzy pliki wykonywalne i uruchamia testy, a redakcyjny przegląd ocenia sens przykładów.
 
-Nie wystarczy opisać ścieżki sukcesu. Dobra implementacja określa stan po częściowym wykonaniu: które efekty już zaszły, co można bezpiecznie powtórzyć, co trzeba posprzątać i jak odróżnić brak wyniku od wyniku pustego. RAII pomaga zamknąć zasób lokalny, ale nie cofa automatycznie efektu w obcym procesie. Transakcja lub protokół kompensacji są osobną decyzją.
+Testy walidatora korzystają z małych kontrolowanych repozytoriów. Wykazują m.in., że krótki zestaw ćwiczeń nie jest błędnie oceniany jak rozdział oraz że martwy link faktycznie powoduje porażkę. Są testami narzędzia, nie dowodem poprawności opisanej w książce arytmetyki czy protokołu HTTP. W raporcie wyniki muszą pozostać rozdzielone.
 
-Obserwowalność projektujemy razem z kontraktem. Zdarzenie powinno zawierać stabilny rodzaj operacji, wynik i identyfikator korelacji, lecz nie kopiować nieograniczonego wejścia. Metryka pokazuje trend, log zachowuje kontekst pojedynczego zdarzenia, a ślad łączy pracę przez granice. Każdy sygnał ma koszt i politykę retencji. Wrażliwe dane redagujemy przed przekazaniem do warstwy telemetrycznej.
+W macierzy ważne są rzeczywiste różnice. Dwie nazwy sterownika tego samego Apple Clang nie tworzą testu GCC i Clang. Z kolei ta sama wersja frontendu z różnymi bibliotekami standardowymi może ujawnić braki biblioteczne. Dla publicznej biblioteki ustal docelową macierz systemu, kompilatora, biblioteki i trybu standardu; ten mały workflow sprawdza tylko zadeklarowany wycinek na runnerze Ubuntu.
 
-Wydajność oceniamy dopiero na reprezentatywnym obciążeniu. Usprawnienie, które pomija walidację, limit albo raportowanie błędu, zmienia kontrakt i nie jest równoważną optymalizacją. Najpierw zapisujemy bazę pomiarową, następnie jedną hipotezę i kryterium odrzucenia. Dzięki temu decyzja dotycząca „pipeline build test analyze” pozostaje sprawdzalna po zmianie sprzętu lub toolchainu.
+Timeout joba i timeout testu chronią zasoby wykonawcy, lecz nie są metodą synchronizacji programu. Test kolejki nadal potrzebuje poprawnego close/drain i dołączenia wątków. Dla scenariusza zewnętrznej usługi przygotuj kontrolowany serwer albo wydzielony test integracyjny. Nie zastępuj awarii sieci losowym sleep i nie interpretuj sporadycznej porażki jako normalnego kosztu testowania.
 
 ## Drugi przykład
 
-Przed implementacją przydaje się krótka karta decyzji. Nie jest ona składnią konkretnego produktu; to przenośny zapis warunków, który później można odwzorować na kod, konfigurację i testy.
+Reprodukcja lokalna powinna używać tych samych kroków i tej samej konfiguracji. Z katalogu głównego repozytorium, z obsługiwanym kompilatorem w PATH:
 
 ~~~text
-temat: pipeline build test analyze
-wejście: nazwane, ograniczone, walidowane na granicy
-sukces: mierzalny efekt i jawny właściciel wyniku
-awarie: dane / zależność / czas / zasób / anulowanie
-cleanup: idempotentny albo chroniony stanem
-telemetria: wynik bez sekretów i nieograniczonej cardinality
-testy: sukces, granica, błąd, częściowe wykonanie
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+CXX=clang++ bash scripts/verify.sh
+cmake -S praktyka -B build/repro-clang-release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release
+cmake --build build/repro-clang-release --config Release
+ctest --test-dir build/repro-clang-release -C Release --output-on-failure
 ~~~
 
-Kartę trzeba skonfrontować z realnym API. Jeżeli biblioteka nie pozwala ustawić deadline, decyzja może wymagać innej biblioteki albo izolacji procesu. Jeżeli typ błędu gubi kod przyczyny, adapter powinien przetłumaczyć go na słownik aplikacji. Jeśli cleanup może zawieść, destruktor nie jest dobrym miejscem na raportowanie jedynego śladu; potrzebna jest jawna operacja zamknięcia i bezpieczny fallback RAII.
+Nie porównuj tych wyników z innym kompilatorem ukrytym w starym cache. Zapisz wersję narzędzia, dokładny commit, polecenie i pełną diagnostykę pierwszego błędu. Dla problemów zależnych od danych zachowaj minimalny przypadek reprodukujący. Lokalne powodzenie na macOS nie jest dowodem powodzenia joba na Ubuntu; do czasu wykonania usługi plik workflow pozostaje sprawdzoną konfiguracją, a nie zielonym odznaczeniem.
 
-Drugi test powinien zakładać, że zależność odpowie w najgorszym dozwolonym momencie. Sprawdź budżet czasu całej operacji, a nie tylko pojedynczego wywołania. Następnie wprowadź kontrolowany błąd i potwierdź stan końcowy. To ćwiczenie ujawnia ukryte założenia znacznie wcześniej niż rozbudowany test end-to-end uruchamiany dopiero przed wydaniem.
+Wersje zewnętrznych akcji mają znaczenie dla odtwarzalności. W dołączonym pliku akcja checkout jest przypięta do konkretnego commitu odpowiadającego wydaniu 4.2.2, a poświadczenia nie pozostają zapisane do późniejszych poleceń Git. Przypięcie jest decyzją o aktualizacji zależności: trzeba świadomie zmieniać identyfikator po przeglądzie nowej wersji. Nie daje ono automatycznego dowodu poprawności całego łańcucha narzędzi.
 
 ## Porównanie i decyzje
 
-Najprostsze rozwiązanie dla „pipeline build test analyze” jest dobrym punktem startowym, jeśli zachowuje kontrakt i daje się obserwować. Rozbudowana warstwa abstrakcji ma sens, gdy izoluje rzeczywistą zmienność: platformę, bibliotekę, protokół albo politykę. Abstrakcja dodana wyłącznie „na przyszłość” zwiększa liczbę stanów i może ukryć istotne ograniczenia zewnętrznego API.
+Szybkie kontrole uruchamiaj wcześnie, a kosztowne warianty według realnego ryzyka. Sanitizery mają własne konfiguracje; ich dostępność i zgodność runtime trzeba sprawdzić osobno. Lokalny ASan zatrzymywał się także dla pustego main, więc nie jest raportowany jako zaliczony. Samo dopisanie flagi w YAML nie rozwiązuje problemu środowiska.
 
-Automatyczna kontrola daje szybki, powtarzalny sygnał, natomiast review ocenia kontekst i konsekwencje. Test potwierdza wybrane przypadki, analiza statyczna bada model bez uruchomienia, a monitoring pokazuje zachowanie prawdziwego obciążenia. Dojrzały proces łączy te perspektywy i jawnie dokumentuje obszary, których aktualnie nie potrafi udowodnić.
+**Ćwiczenie 1.** CI uruchomiło CTest po zmianie parsera, ale nie wykonało build. Dlaczego zielony wynik może być bezwartościowy?
 
-Decyzję zapisujemy wraz z warunkiem ponownej oceny: wzrostem wolumenu, nową platformą, zmianą ABI, innym profilem zagrożeń albo wymaganiem zgodności. Dzięki temu kompromis nie zamienia się w przypadkową tradycję. Źródło pierwotne dla tego działu stanowi [GitHub Actions documentation](https://docs.github.com/en/actions); dokładne opcje zawsze sprawdzaj dla używanej wersji narzędzia.
+<details><summary>Rozwiązanie</summary>
+
+CTest może uruchomić wcześniejszy plik wykonywalny. Skieruj kroki do tego samego katalogu, wykonaj build i przerwij przepływ po jego błędzie. Potwierdź skuteczność testu kontrolowaną regresją w kopii źródeł.
+
+</details>
+
+**Ćwiczenie 2.** Dwie konfiguracje przechodzą, jedna zawodzi. Czy usunięcie tej komórki macierzy jest naprawą?
+
+<details><summary>Rozwiązanie</summary>
+
+Tylko świadome zakończenie wsparcia i zmiana kontraktu mogą uzasadniać usunięcie. Najpierw rozpoznaj brak funkcji, błąd programu albo wadę środowiska. Zapisz reprodukcję i skoryguj kod, konfigurację lub deklarowany zakres wsparcia.
+
+</details>
+
+Źródła: [składnia workflow](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax), [macierze jobów](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations), [przypięte wydanie checkout](https://github.com/actions/checkout/commit/11bd71901bbe5b1630ceea73d27597364c9af683).
 
 ## Powiązane tematy
 
-- [Mapa działu](README.md)
-- [Zestaw ćwiczeń](ZESTAW-CWICZEN.md)
-- [GitHub Actions documentation](https://docs.github.com/en/actions)
+- [Presety CMake](../14_warsztat_profesjonalisty/03_cmake_presets_i_ninja.md)
+- [Macierze platform](02_macierze_kompilatorow_i_platform.md)
+- [Rzeczywiste testy laboratoriów](../praktyka/README.md)
